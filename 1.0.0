@@ -1,0 +1,95 @@
+Requirement already satisfied: langchain in d:\whatsapp integration\.venv\lib\site-packages (0.0.352)
+Collecting langchain
+  Obtaining dependency information for langchain from https://files.pythonhosted.org/packages/8c/06/0e03587da37173c29a58bf17312793c2453df9ca2912e9adfe869c120437/langchain-1.0.2-py3-none-any.whl.metadata
+  Using cached langchain-1.0.2-py3-none-any.whl.metadata (4.7 kB)
+Requirement already satisfied: langchain-core in d:\whatsapp integration\.venv\lib\site-packages (0.1.23)
+Collecting langchain-core
+  Obtaining dependency information for langchain-core from https://files.pythonhosted.org/packages/c0/54/3cdbe9d151d06cd689b5aa937ac11403b64bbfe76486fda6431a24061721/langchain_core-1.0.1-py3-none-any.whl.metadata
+  Using cached langchain_core-1.0.1-py3-none-any.whl.metadata (3.5 kB)
+Requirement already satisfied: langchain-community in d:\whatsapp integration\.venv\lib\site-packages (0.0.20)
+Collecting langchain-community
+  Obtaining dependency information for langchain-community from https://files.pythonhosted.org/packages/f0/a4/c4fde67f193401512337456cabc2148f2c43316e445f5decd9f8806e2992/langchain_community-0.4.1-py3-none-any.whl.metadata
+  Using cached langchain_community-0.4.1-py3-none-any.whl.metadata (3.0 kB)
+Requirement already satisfied: langchain-openai in d:\whatsapp integration\.venv\lib\site-packages (1.0.1)
+Requirement already satisfied: langchain-text-splitters in d:\whatsapp integration\.venv\lib\site-packages (1.0.0)
+Requirement already satisfied: faiss-cpu in d:\whatsapp integration\.venv\lib\site-packages (1.12.0)
+Requirement already satisfied: openai in d:\whatsapp integration\.venv\lib\site-packages (2.6.1)
+Requirement already satisfied: langgraph<1.1.0,>=1.0.0 in d:\whatsapp integration\.venv\lib\site-packages (from langchain) (1.0.1)
+Requirement already satisfied: pydantic<3.0.0,>=2.7.4 in d:\whatsapp integration\.venv\lib\site-packages (from langchain) (2.12.3)
+Requirement already satisfied: jsonpatch<2.0.0,>=1.33.0 in d:\whatsapp integration\.venv\lib\site-packages (from langchain-core) (1.33)
+Collecting langsmith<1.0.0,>=0.3.45 (from langchain-core)
+  Obtaining dependency information for langsmith<1.0.0,>=0.3.45 from https://files.pythonhosted.org/packages/b4/2b/7e0248f65e35800ea8e4e3dbb3bcc36c61b81f5b8abeddaceec8320ab491/langsmith-0.4.38-py3-none-any.whl.metadata
+  Using cached langsmith-0.4.38-py3-none-any.whl.metadata (14 kB)
+Requirement already satisfied: packaging<26.0.0,>=23.2.0 in d:\whatsapp integration\.venv\lib\site-packages (from langchain-core) (23.2)
+Requirement already satisfied: pyyaml<7.0.0,>=5.3.0 in d:\whatsapp integration\.venv\lib\site-packages (from langchain-core) (6.0.3)
+Requirement already satisfied: tenacity!=8.4.0,<10.0.0,>=8.1.0 in d:\whatsapp integration\.venv\lib\site-packages (from langchain-core) (8.5.0)
+Requirement already satisfied: typing-extensions<5.0.0,>=4.7.0 in d:\whatsapp integration\.venv\lib\site-packages (from langchain-core) (4.15.0)
+Requirement already satisfied: langchain-classic<2.0.0,>=1.0.0 in d:\whatsapp integration\.venv\lib\site-packages (from langchain-community) (1.0.0)
+Requirement already satisfied: SQLAlchemy<3.0.0,>=1.4.0 in d:\whatsapp integration\.venv\lib\site-packages (from langchain-community) (2.0.44)
+Requirement already satisfied: requests<3.0.0,>=2.32.5 in d:\whatsapp integration\.venv\lib\site-packages (from langchain-community) (2.32.5)
+Requirement already satisfied: aiohttp<4.0.0,>=3.8.3 in d:\whatsapp integration\.venv\lib\site-packages (from langchain-community) (3.13.1)
+Requirement already satisfied: dataclasses-json<0.7.0,>=0.6.7 in d:\whatsapp integration\.venv\lib\site-packages (from langchain-community) (0.6.7)
+Requirement already satisfied: pydantic-settings<3.0.0,>=2.10.1 in d:\whatsapp integration\.venv\lib\site-packages (from langchain-community) (2.11.0)
+Requirement already satisfied: httpx-sse<1.0.0,>=0.4.0 in d:\whatsapp integration\.venv\lib\site-packages (from langchain-community) (0.4.3)
+Requirement already satisfied: numpy>=1.26.2 in d:\whatsapp integration\.venv\lib\site-packages (from langchain-community) (1.26.4)
+Requirement already satisfied: tiktoken<1.0.0,>=0.7.0 in d:\whatsapp integration\.venv\lib\site-packages (from langchain-openai) (0.12.0)
+Requirement already satisfied: anyio<5,>=3.5.0 in d:\whatsapp integration\.venv\lib\site-packages (from openai) (3.7.1)
+Requirement already satisfied: distro<2,>=1.7.0 in d:\whatsapp integration\.venv\lib\site-packages (from openai) (1.9.0)
+Requirement already satisfied: httpx<1,>=0.23.0 in d:\whatsapp integration\.venv\lib\site-packages (from openai) (0.28.1)
+Requirement already satisfied: jiter<1,>=0.10.0 in d:\whatsapp integration\.venv\lib\site-packages (from openai) (0.11.1)
+Requirement already satisfied: sniffio in d:\whatsapp integration\.venv\lib\site-packages (from openai) (1.3.1)
+Requirement already satisfied: tqdm>4 in d:\whatsapp integration\.venv\lib\site-packages (from openai) (4.67.1)
+Requirement already satisfied: aiohappyeyeballs>=2.5.0 in d:\whatsapp integration\.venv\lib\site-packages (from aiohttp<4.0.0,>=3.8.3->langchain-community) (2.6.1)
+Requirement already satisfied: aiosignal>=1.4.0 in d:\whatsapp integration\.venv\lib\site-packages (from aiohttp<4.0.0,>=3.8.3->langchain-community) (1.4.0)
+Requirement already satisfied: attrs>=17.3.0 in d:\whatsapp integration\.venv\lib\site-packages (from aiohttp<4.0.0,>=3.8.3->langchain-community) (25.4.0)
+Requirement already satisfied: frozenlist>=1.1.1 in d:\whatsapp integration\.venv\lib\site-packages (from aiohttp<4.0.0,>=3.8.3->langchain-community) (1.8.0)
+Requirement already satisfied: multidict<7.0,>=4.5 in d:\whatsapp integration\.venv\lib\site-packages (from aiohttp<4.0.0,>=3.8.3->langchain-community) (6.7.0)
+Requirement already satisfied: propcache>=0.2.0 in d:\whatsapp integration\.venv\lib\site-packages (from aiohttp<4.0.0,>=3.8.3->langchain-community) (0.4.1)
+Requirement already satisfied: yarl<2.0,>=1.17.0 in d:\whatsapp integration\.venv\lib\site-packages (from aiohttp<4.0.0,>=3.8.3->langchain-community) (1.22.0)
+Requirement already satisfied: idna>=2.8 in d:\whatsapp integration\.venv\lib\site-packages (from anyio<5,>=3.5.0->openai) (3.11)
+Requirement already satisfied: marshmallow<4.0.0,>=3.18.0 in d:\whatsapp integration\.venv\lib\site-packages (from dataclasses-json<0.7.0,>=0.6.7->langchain-community) (3.26.1)
+Requirement already satisfied: typing-inspect<1,>=0.4.0 in d:\whatsapp integration\.venv\lib\site-packages (from dataclasses-json<0.7.0,>=0.6.7->langchain-community) (0.9.0)
+Requirement already satisfied: certifi in d:\whatsapp integration\.venv\lib\site-packages (from httpx<1,>=0.23.0->openai) (2025.10.5)
+Requirement already satisfied: httpcore==1.* in d:\whatsapp integration\.venv\lib\site-packages (from httpx<1,>=0.23.0->openai) (1.0.9)
+Requirement already satisfied: h11>=0.16 in d:\whatsapp integration\.venv\lib\site-packages (from httpcore==1.*->httpx<1,>=0.23.0->openai) (0.16.0)
+Requirement already satisfied: jsonpointer>=1.9 in d:\whatsapp integration\.venv\lib\site-packages (from jsonpatch<2.0.0,>=1.33.0->langchain-core) (3.0.0)
+Requirement already satisfied: langgraph-checkpoint<4.0.0,>=2.1.0 in d:\whatsapp integration\.venv\lib\site-packages (from langgraph<1.1.0,>=1.0.0->langchain) (3.0.0)
+Requirement already satisfied: langgraph-prebuilt<1.1.0,>=1.0.0 in d:\whatsapp integration\.venv\lib\site-packages (from langgraph<1.1.0,>=1.0.0->langchain) (1.0.1)
+Requirement already satisfied: langgraph-sdk<0.3.0,>=0.2.2 in d:\whatsapp integration\.venv\lib\site-packages (from langgraph<1.1.0,>=1.0.0->langchain) (0.2.9)
+Requirement already satisfied: xxhash>=3.5.0 in d:\whatsapp integration\.venv\lib\site-packages (from langgraph<1.1.0,>=1.0.0->langchain) (3.6.0)
+Requirement already satisfied: orjson>=3.9.14 in d:\whatsapp integration\.venv\lib\site-packages (from langsmith<1.0.0,>=0.3.45->langchain-core) (3.11.4)
+Requirement already satisfied: requests-toolbelt>=1.0.0 in d:\whatsapp integration\.venv\lib\site-packages (from langsmith<1.0.0,>=0.3.45->langchain-core) (1.0.0)
+Requirement already satisfied: zstandard>=0.23.0 in d:\whatsapp integration\.venv\lib\site-packages (from langsmith<1.0.0,>=0.3.45->langchain-core) (0.25.0)
+Requirement already satisfied: annotated-types>=0.6.0 in d:\whatsapp integration\.venv\lib\site-packages (from pydantic<3.0.0,>=2.7.4->langchain) (0.7.0)
+Requirement already satisfied: pydantic-core==2.41.4 in d:\whatsapp integration\.venv\lib\site-packages (from pydantic<3.0.0,>=2.7.4->langchain) (2.41.4)
+Requirement already satisfied: typing-inspection>=0.4.2 in d:\whatsapp integration\.venv\lib\site-packages (from pydantic<3.0.0,>=2.7.4->langchain) (0.4.2)
+Requirement already satisfied: python-dotenv>=0.21.0 in d:\whatsapp integration\.venv\lib\site-packages (from pydantic-settings<3.0.0,>=2.10.1->langchain-community) (1.0.1)
+Requirement already satisfied: charset_normalizer<4,>=2 in d:\whatsapp integration\.venv\lib\site-packages (from requests<3.0.0,>=2.32.5->langchain-community) (3.4.4)
+Requirement already satisfied: urllib3<3,>=1.21.1 in d:\whatsapp integration\.venv\lib\site-packages (from requests<3.0.0,>=2.32.5->langchain-community) (2.5.0)
+Requirement already satisfied: greenlet>=1 in d:\whatsapp integration\.venv\lib\site-packages (from SQLAlchemy<3.0.0,>=1.4.0->langchain-community) (3.2.4)
+Requirement already satisfied: regex>=2022.1.18 in d:\whatsapp integration\.venv\lib\site-packages (from tiktoken<1.0.0,>=0.7.0->langchain-openai) (2025.10.23)
+Requirement already satisfied: colorama in d:\whatsapp integration\.venv\lib\site-packages (from tqdm>4->openai) (0.4.6)
+Requirement already satisfied: ormsgpack>=1.10.0 in d:\whatsapp integration\.venv\lib\site-packages (from langgraph-checkpoint<4.0.0,>=2.1.0->langgraph<1.1.0,>=1.0.0->langchain) (1.11.0)
+Requirement already satisfied: mypy-extensions>=0.3.0 in d:\whatsapp integration\.venv\lib\site-packages (from typing-inspect<1,>=0.4.0->dataclasses-json<0.7.0,>=0.6.7->langchain-community) (1.1.0)
+Using cached langchain-1.0.2-py3-none-any.whl (107 kB)
+Using cached langchain_core-1.0.1-py3-none-any.whl (467 kB)
+Using cached langchain_community-0.4.1-py3-none-any.whl (2.5 MB)
+Using cached langsmith-0.4.38-py3-none-any.whl (397 kB)
+Installing collected packages: langsmith, langchain-core, langchain-community, langchain
+  Attempting uninstall: langsmith
+    Found existing installation: langsmith 0.0.87
+    Uninstalling langsmith-0.0.87:
+      Successfully uninstalled langsmith-0.0.87
+  Attempting uninstall: langchain-core
+    Found existing installation: langchain-core 0.1.23
+    Uninstalling langchain-core-0.1.23:
+      Successfully uninstalled langchain-core-0.1.23
+  Attempting uninstall: langchain-community
+    Found existing installation: langchain-community 0.0.20
+    Uninstalling langchain-community-0.0.20:
+      Successfully uninstalled langchain-community-0.0.20
+  Attempting uninstall: langchain
+    Found existing installation: langchain 0.0.352
+    Uninstalling langchain-0.0.352:
+      Successfully uninstalled langchain-0.0.352
+Successfully installed langchain-1.0.2 langchain-community-0.4.1 langchain-core-1.0.1 langsmith-0.4.38
