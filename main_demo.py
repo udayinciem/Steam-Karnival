@@ -70,22 +70,32 @@ def fetch_all_chats(user_mobile):
     return list(chats_col.find({"user_mobile_number": user_mobile}).sort("user_timestamp", 1))
 
 def find_excel_file():
-    """Find the first Excel file in the PDF storage directory"""
+    """Find the most recently modified Excel file in the PDF storage directory."""
     try:
         print("\n=== Looking for Excel File ===")
         excel_files = []
         for file in os.listdir(PDF_STORAGE):
-            if file.endswith(('.xlsx', '.xls')):
-                excel_files.append(file)
-        
+            # Skip Excel lock/temp files that start with '~$'
+            if file.startswith('~$'):
+                continue
+            if file.lower().endswith(('.xlsx', '.xls')):
+                full_path = os.path.join(PDF_STORAGE, file)
+                try:
+                    mtime = os.path.getmtime(full_path)
+                except Exception:
+                    mtime = 0
+                excel_files.append((file, mtime))
         if excel_files:
-            print(f"Found Excel files: {excel_files}")
-            excel_path = os.path.join(PDF_STORAGE, excel_files[0])
-            print(f"Using Excel file: {excel_path}")
+            # Pick the newest by modification time
+            excel_files.sort(key=lambda t: t[1], reverse=True)
+            newest_name, _ = excel_files[0]
+            print(f"Found Excel files: {[n for n,_ in excel_files]}")
+            excel_path = os.path.join(PDF_STORAGE, newest_name)
+            print(f"Using newest Excel file: {excel_path}")
             return excel_path
-        else:
-            print("No Excel files found in PDF storage directory")
-            return None
+        # If only lock file existed or none found
+        print("No valid Excel files found in PDF storage directory. If an Excel file is open, close it (to remove '~$' lock file) and try again.")
+        return None
     except Exception as e:
         print(f"Error finding Excel file: {e}")
         return None
@@ -128,6 +138,21 @@ program_cache = {
 program_cache['combined_data'] = []
 program_cache['processed_files'] = {}
 program_cache['last_cache_update'] = pd.Timestamp.now()
+
+def clear_schedule_cache():
+    """Hard-reset all in-memory caches so old Excel content cannot persist."""
+    try:
+        program_cache['excel_data'] = None
+        program_cache['pdf_data'] = {}
+        program_cache['last_excel_update'] = None
+        program_cache['processed_files'] = {}
+        program_cache['combined_data'] = None
+        program_cache['last_cache_update'] = None
+        print("All caches cleared.")
+        return True
+    except Exception as e:
+        print(f"Error clearing cache: {e}")
+        return False
 
 def list_pdf_files():
     """List all files in the PDF storage directory"""
@@ -697,8 +722,29 @@ def update_excel_cache():
                     print(f"\nColumn {col} unique values:")
                     print(df[col].unique())
                 
-                # Rename columns to match our expected format
-                df.columns = ['Stage', 'Program', 'Category', 'Date']
+                # Dynamically rename columns for schedule Excel file
+                # Accepts various headers: Time (Stage), Item (Program), Category, Date
+                map_cols = {}
+                wanted = {'Stage': ['stage', 'time'], 'Program': ['program', 'item'], 'Category': ['category'], 'Date': ['date']}
+                for wanted_col, options in wanted.items():
+                    for col in df.columns:
+                        col_lower = str(col).strip().lower()
+                        # Check cell value if first row is not likely a header
+                        col0_val = str(df.iloc[0][col]).strip().lower() if df.shape[0] > 0 else ''
+                        all_names = set([col_lower, col0_val])
+                        if any(any(name.startswith(opt) for opt in options) for name in all_names):
+                            map_cols[wanted_col] = col
+                            break
+                # Fill in missing mappings by guessing by position if not found and only 4 columns
+                if len(map_cols) < 4 and len(df.columns) == 4:
+                    map_order = ['Stage', 'Program', 'Category', 'Date']
+                    for idx, want in enumerate(map_order):
+                        if want not in map_cols:
+                            map_cols[want] = df.columns[idx]
+                # Rename columns accordingly
+                df = df.rename(columns={v: k for k, v in map_cols.items() if v in df.columns})
+                print("\n=== COLUMNS AFTER RENAME ===")
+                print(df.columns)
                 
                 print("\n=== CLEANING DATA ===")
                 # Clean up the data
@@ -709,11 +755,27 @@ def update_excel_cache():
                     df[col] = df[col].replace('nan', '')
                     print("After cleaning:", df[col].head())
                 
-                print("\n=== REMOVING EMPTY ROWS ===")
+                print("\n=== REMOVING EMPTY/HEADER ROWS ===")
                 print("Rows before:", len(df))
                 # Remove any empty rows
                 df = df.dropna(how='all')
                 df = df[df['Program'].str.len() > 0]
+                # Remove header-like rows that leaked into data
+                header_like_programs = {"program", "program name", "programme", "programs", "programmes"}
+                header_like_stages = {"stage", "stages"}
+                header_like_categories = {"category", "categories"}
+                header_like_dates = {"date", "dates"}
+                df = df[~df['Program'].str.strip().str.lower().isin(header_like_programs)]
+                df = df[~df['Stage'].str.strip().str.lower().isin(header_like_stages)]
+                df = df[~df['Category'].str.strip().str.lower().isin(header_like_categories)]
+                df = df[~df['Date'].str.strip().str.lower().isin(header_like_dates)]
+                # Also drop rows where all four columns equal their header tokens
+                df = df[~(
+                    df['Stage'].str.strip().str.upper().eq('STAGE') &
+                    df['Program'].str.strip().str.upper().eq('PROGRAM') &
+                    df['Category'].str.strip().str.upper().eq('CATEGORY') &
+                    df['Date'].str.strip().str.upper().eq('DATE')
+                )]
                 print("Rows after:", len(df))
                 
                 print("\n=== FINAL DATA ===")
@@ -808,7 +870,8 @@ async def test_webhook(message: str = None, test_body: TestMessage = None):
         extracted = extract_query_info(final_message)
         print(f"Extracted info: {extracted}")
         
-        # Get combined data from cache
+        # Force clean slate before testing
+        clear_schedule_cache()
         combined_data = update_cache_if_needed()
         print(f"Found {len(combined_data)} programs in data")
         
@@ -895,70 +958,56 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...), MediaUr
             return {"status": "error", "message": str(e)}
 
     # --- Normal chat logic when no PDF ---
-    # Step 1: Spelling correction via OpenAI before intent extraction
-    try:
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        correction_prompt = (
-            "Correct any spelling or grammar mistakes in the following user WhatsApp message. "
-            "Only return the corrected sentence, do not explain or add anything extra:\n"
-            f"{user_message}"
-        )
-        correction_result = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are an expert in English grammar and spelling correction."},
-                {"role": "user", "content": correction_prompt}
-            ],
-            max_tokens=256
-        )
-        corrected_user_message = correction_result.choices[0].message.content.strip()
-        print(f"Corrected message: {corrected_user_message}")
-    except Exception as e:
-        print(f"Spelling correction failed: {e}")
-        corrected_user_message = user_message
-
-    # Step 2: Extract query info from the corrected message
-    extracted = extract_query_info(corrected_user_message)
-    
-    # Step 3: Get chat history entries for context (last 5 only)
+    extracted = extract_query_info(user_message)
+    # Step 2: Get chat history (last 5 turns) for intelligent follow-up detection
     chat_history_entries = fetch_all_chats(user_number)
-    last_five = chat_history_entries[-5:] if len(chat_history_entries) > 5 else chat_history_entries
+    recent_entries = chat_history_entries[-5:] if len(chat_history_entries) > 5 else chat_history_entries
     chat_history = ""
-    for entry in last_five:
+    for entry in recent_entries:
         chat_history += (
             f"User ({entry['user_timestamp']}): {entry['user_question']}\n"
             f"Bot: {entry['response']}\n"
         )
-    chat_history += f"User (now): {corrected_user_message}\n"
+    chat_history += f"User (now): {user_message}\n"
 
-    # Step 4: Intelligent system/context prompt for role, follow-up, persona
-    context_prompt = (
-        "You are Receptionist for Kalsolavm.\n"
-        "You ALWAYS act as the official receptionist, answering as if you are at an actual help desk at Kalsolavm.\n"
-        "The user may ask follow-up or context-dependent questions. Use the context/chat history provided (showing up to the last 5 exchanges with the user) to infer any implied or unspoken context.\n"
-        "You must rely on your own AI intelligence to decide if a question is a follow-up, and deduce what the user refers to, without relying on any hardcoded phrases or keywords.\n"
-        "Correct any misunderstanding or unclear requests gracefully.\n"
-        "Always answer as the Receptionist for Kalsolavm – do not break character.\n"
-        "If the question is unclear, politely ask for clarification.\n"
-        f"Here is the conversation with the user so far:\n{chat_history}\n"
-        "Now answer as a helpful, natural, and professional receptionist, spelling and grammar already corrected above."
-    )
-
+    # AI-driven follow-up analysis (no hardcoded indicators)
+    final_query = user_message
+    try:
+        followup_resp = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            temperature=0,
+            messages=[
+                {"role": "system", "content": "You are the Receptionist for Kalsolavm. Decide if the user's latest message is a follow-up to the prior conversation. Return strict JSON only."},
+                {"role": "user", "content": f"Conversation so far (last 5 turns):\n{chat_history}\n\nTask: Is the latest message a follow-up to the previous topic? If yes, rewrite it into a standalone query that includes the missing context.\nReturn JSON: {{\"is_followup\": true|false, \"standalone_query\": \"...\"}}"}
+            ]
+        )
+        raw = followup_resp.choices[0].message.content.strip()
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict) and data.get("standalone_query"):
+                final_query = str(data["standalone_query"]).strip()
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"follow-up analysis failed: {e}")
     try:
         program_cache['combined_data'] = None
         program_cache['excel_data'] = None
+        # Ensure no old Excel content persists between user runs
+        clear_schedule_cache()
         combined_data = update_cache_if_needed()
-        ai_response = search_program_data(extracted, context_prompt, combined_data)
+        # Use AI-generated standalone query if it's a follow-up; otherwise the original message
+        ai_response = search_program_data(extracted, final_query, combined_data)
     except Exception as e:
         ai_response = ("I'm having trouble accessing the program data right now. "
                        "Please try again in a moment.")
-    final_reply = generate_human_like_reply(corrected_user_message, ai_response)
+    final_reply = generate_human_like_reply(user_message, ai_response)
     send_result = send_whatsapp_message(user_number, final_reply)
     # Store the chat with full details
     store_chat(
         user_mobile=user_number,
         timestamp=datetime.utcnow(),
-        question=corrected_user_message,
+        question=user_message,
         response=final_reply
     )
     return {"status": "ok"}
@@ -1123,6 +1172,33 @@ def search_program_data(extracted, user_message, combined_data=None):
     # Build query terms for manual/excel search
     query_terms = build_query_terms(user_message)
     
+    # Special intent: count total number of stages (data-driven; no hardcoding)
+    lower_msg = user_message.lower()
+    is_stage_count_query = (
+        any(kw in lower_msg for kw in ["stage", "stages"]) and
+        (
+            any(kw in lower_msg for kw in ["how many", "number", "count", "total"]) or
+            "no of" in lower_msg or
+            re.search(r"\bno\.?\s*of\s+stages\b", lower_msg) is not None or
+            re.search(r"\bstages?\b.*\bhow\s+many\b", lower_msg) is not None
+        )
+    )
+    if is_stage_count_query:
+        stages = set()
+        for prog in (combined_data or []):
+            stage_raw = str(prog.get("Stage", "")).strip()
+            if not stage_raw:
+                continue
+            # Extract numeric part and ignore header-like rows
+            m = re.search(r"(\d+)", stage_raw)
+            if not m:
+                continue
+            stages.add(int(m.group(1)))
+        total = len(stages)
+        if total > 0:
+            return f"There are {total} stages in Kalolsavam."
+        return "I couldn't find stage information in the schedule data."
+
     # Check if this is a program/stage/schedule question - prioritize Excel data
     is_schedule_question = any(term in user_message.lower() for term in [
         "stage", "performing", "program", "schedule", "date", "when is", 
@@ -1173,23 +1249,6 @@ def search_program_data(extracted, user_message, combined_data=None):
                     seen.add(prog_key)
                     deduped.append(prog)
             matching_programs = deduped
-            if len(matching_programs) == 1:
-                # Early return for single precise Excel match
-                single = matching_programs[0]
-                prog_name = single.get("Program Name", "Unknown")
-                stage_info = single.get("Stage", "Unknown stage")
-                category_info = single.get("Category", "")
-                date_raw = str(single.get("Date", "")).strip()
-                try:
-                    date_obj = pd.to_datetime(date_raw, errors='coerce')
-                    date_info = date_obj.strftime("%d-%m-%Y") if pd.notna(date_obj) else date_raw
-                except Exception:
-                    date_info = date_raw
-                if date_info:
-                    if category_info and category_info != "N/A":
-                        return f"{prog_name} is performing on {stage_info} ({category_info}) on {date_info}."
-                    else:
-                        return f"{prog_name} is performing on {stage_info} on {date_info}."
             
             # Helper function to format date nicely
             def format_date_for_answer(date_str):
@@ -1236,7 +1295,7 @@ def search_program_data(extracted, user_message, combined_data=None):
                     matching_programs = filtered_matches
                     print(f"Filtered to {len(matching_programs)} program(s) for date {filter_date}")
 
-            # Format the answer directly from Excel data
+            # Format the answer directly from Excel data (no hallucinations)
             results = []
             for prog in matching_programs:
                 prog_name = prog.get("Program Name", "Unknown")
@@ -1272,6 +1331,13 @@ def search_program_data(extracted, user_message, combined_data=None):
                     return f"{prog_name} is performing on {results[0]} and {results[1]}."
                 else:
                     return f"{prog_name} is performing on the following stages:\n" + "\n".join([f"• {r}" for r in results])
+        else:
+            # No Excel match at all – avoid hallucination
+            # Provide a clear receptionist-style fallback with guidance
+            return (
+                "I couldn't find that program in the official schedule. "
+                "Please check the exact program name or share a screenshot of the row."
+            )
     
     # Always try to get FAISS PDF chunks (but don't use for schedule questions if Excel has answer)
     print("\n" + "="*60)
@@ -1772,6 +1838,14 @@ IMPORTANT: Understand user intent. If they ask "category one programmes", they m
 
     # Filter and search through combined data
     filtered_programs = all_programs.copy()
+
+    # Detect gender intent from message (used for category queries)
+    msg_lower = user_message.lower()
+    gender_intent = None
+    if "girls" in msg_lower or "girl" in msg_lower:
+        gender_intent = "GIRLS"
+    elif "boys" in msg_lower or "boy" in msg_lower:
+        gender_intent = "BOYS"
     
     def filter_programs(programs, condition):
         return [p for p in programs if condition(p)]
@@ -1789,6 +1863,30 @@ IMPORTANT: Understand user intent. If they ask "category one programmes", they m
         filtered_programs = filter_programs(
             filtered_programs,
             lambda p: f"Stage {stage_num}" in str(p.get("Stage", ""))
+        )
+
+    # Category filter (supports forms like "CAT-2", "CAT - 2", "CATEGORY 2", "CATEGORY II")
+    if extracted.get("category"):
+        cat_num = str(extracted["category"]).strip()
+        def _cat_match(cat_val: str) -> bool:
+            c = str(cat_val or "").upper().replace(" ", "")
+            return (
+                f"CAT-{cat_num}".replace(" ", "") in c or
+                f"CAT- {cat_num}".replace(" ", "") in c or
+                f"CAT{cat_num}" in c or
+                f"CATEGORY{cat_num}" in c or
+                c.endswith(cat_num)
+            )
+        filtered_programs = filter_programs(
+            filtered_programs,
+            lambda p: _cat_match(p.get("Category", ""))
+        )
+
+    # Gender refinement for category/program queries
+    if gender_intent:
+        filtered_programs = filter_programs(
+            filtered_programs,
+            lambda p: gender_intent in str(p.get("Program Name", "")).upper()
         )
     
     if extracted.get("date") or extracted.get("day"):
@@ -1906,6 +2004,28 @@ IMPORTANT: Understand user intent. If they ask "category one programmes", they m
         )
         for program in matching_programs:
             results.append(format_program_details(program, detailed=True))
+
+    elif query_type == "category" or (query_type == "general" and extracted.get("category")):
+        if filtered_programs:
+            header = f"*Category {extracted.get('category')} programs*"
+            if gender_intent:
+                header = f"*{gender_intent.title()} Category {extracted.get('category')} programs*"
+            results.append(header + ":\n")
+            # Show concise lines: Program – Stage on Date (Category)
+            def _fmt_row(p):
+                prog = p.get("Program Name", "Unknown")
+                stage = p.get("Stage", "N/A")
+                date = p.get("Date", "")
+                cat = p.get("Category", "")
+                return f"• {prog} – {stage} on {date} ({cat})"
+            # De-duplicate by Program+Stage+Date
+            seen = set()
+            for p in filtered_programs:
+                key = (p.get("Program Name", ""), p.get("Stage", ""), p.get("Date", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append(_fmt_row(p))
     
     elif query_type == "general":
         # For general queries, try to match against all fields
@@ -1940,14 +2060,10 @@ IMPORTANT: Understand user intent. If they ask "category one programmes", they m
 
 
 def _deduplicate_and_flatten_list_text(raw_text: str) -> str:
-    """
-    Convert common bullet-style lists into a concise, human sentence and de-duplicate items.
-    Keeps original order of first appearance.
-    """
+    """De-duplicate bullet-like lines and convert to a simple sentence when possible."""
     if not raw_text:
         return raw_text
     lines = [l.strip() for l in raw_text.splitlines()]
-    # Separate header-ish first non-empty line if it looks like a title
     header = None
     content_lines = []
     for idx, l in enumerate(lines):
@@ -1958,26 +2074,19 @@ def _deduplicate_and_flatten_list_text(raw_text: str) -> str:
         break
     if header is None:
         content_lines = lines
-    # Collect bullet-like items
     items = []
     seen = set()
     for l in content_lines:
         s = l.lstrip("-•* ").strip()
         if not s:
             continue
-        # Filter duplicate lines
         key = s.lower()
         if key in seen:
             continue
         seen.add(key)
         items.append(s)
-    # If we found enough items, make a sentence
     if items:
-        if header and len(header) < 160:
-            prefix = header.rstrip(':').strip()
-        else:
-            prefix = None
-        # Join items with commas and an 'and' for the last one when short
+        prefix = header.rstrip(':').strip() if header and len(header) < 160 else None
         if len(items) == 1:
             joined = items[0]
         elif len(items) == 2:
@@ -1990,8 +2099,10 @@ def _deduplicate_and_flatten_list_text(raw_text: str) -> str:
 
 def generate_human_like_reply(user_message, info_text):
     """
-    Use OpenAI to generate a polite, conversational response that reads naturally
-    as a human WhatsApp receptionist message (no emojis), de-duplicating repeated list items.
+    Generate a concise, non-hallucinated WhatsApp reply:
+    - Use ONLY the content in info_text; never invent items.
+    - Prefer one short paragraph; no emojis.
+    - If info_text signals "not found", reply politely with guidance.
     """
     try:
         cleaned_info = _deduplicate_and_flatten_list_text(info_text)
@@ -2000,18 +2111,18 @@ def generate_human_like_reply(user_message, info_text):
             temperature=0.2,
             messages=[
                 {"role": "system", "content": """You are a clear, concise WhatsApp assistant for the Kalolsavam Cultural Festival.
-                Style rules:
-                - Sound natural and human, not robotic
-                - Be polite and direct; avoid chit-chat unless asked
-                - Do NOT use emojis or emoticons
-                - Prefer short paragraphs over bullet lists when possible
-                - If the assistant content is a list of dates or similar items, consolidate duplicates and present them in a single natural sentence
-                - Do not invent items; only use what is provided
-                - If no programs are found, suggest how to ask
-                - ALWAYS preserve exact dates as written; do not substitute with words like 'today' or 'tomorrow'"""},
+                HARD CONSTRAINTS (NO HALLUCINATIONS):
+                - Use ONLY the content provided by the assistant message; never add or infer extra items, dates, stages, or categories.
+                - If the user asks about a specific program name (e.g., MONO ACT), include ONLY lines that refer to that exact program name. Do NOT include similarly worded but different items (e.g., ENGLISH ONE ACT PLAY) when asked about MONO ACT.
+                - If there is a single schedule entry, answer with ONE short, natural sentence.
+                - If multiple entries exist for that same program, consolidate into one short readable sentence, listing each unique (Stage, Category, Date) only once.
+                - If no entries for the exact program are present, clearly say you couldn't find it and suggest checking the exact program name. Do not fabricate.
+                - No emojis; keep it brief and professional.
+                - Preserve exact dates as written; do not substitute with relative words.
+                - IMPORTANT: If the assistant content contains entries that are NOT for the exact program requested, IGNORE those lines entirely."""},
                 {"role": "user", "content": user_message},
                 {"role": "assistant", "content": f"{cleaned_info}"},
-                {"role": "user", "content": "Rewrite the above as a natural, concise WhatsApp reply in one or two sentences, without emojis. Consolidate duplicates and avoid repetitive bullet formatting."}
+                {"role": "user", "content": "Rewrite the above as a brief, human reply without emojis. Include ONLY entries that match the exact program name asked by the user. Do not add or infer any data that is not present above."}
             ]
         )
         text = response.choices[0].message.content.strip()
@@ -2249,6 +2360,7 @@ async def ask_unified_post(request: Request):
     
     try:
         extracted = extract_query_info(question)
+        clear_schedule_cache()
         combined_data = update_cache_if_needed()
         answer = search_program_data(extracted, question, combined_data)
         return {"status": "success", "question": question, "answer": answer}
