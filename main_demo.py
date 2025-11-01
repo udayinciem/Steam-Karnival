@@ -1,15 +1,15 @@
+# -*- coding: utf-8 -*-
 from fastapi import FastAPI, Form, Response, File, UploadFile, Query, Request
 from twilio.rest import Client as TwilioClient
 import pandas as pd
 from openai import OpenAI
 from dotenv import load_dotenv
-from pymongo import MongoClient
 from datetime import datetime
 import os
 import json
-import fitz  # PyMuPDF
 import io
 import re
+import requests
 try:
     # Optional: Only used if FAISS vectors are available
     from langchain_openai import OpenAIEmbeddings
@@ -17,6 +17,21 @@ try:
     _FAISS_AVAILABLE = True
 except Exception:
     _FAISS_AVAILABLE = False
+
+# Optional MongoDB for chat history
+try:
+    from pymongo import MongoClient
+    _MONGO_AVAILABLE = True
+except Exception:
+    _MONGO_AVAILABLE = False
+
+# Import PDF OCR extractor for processing PDFs and creating embeddings
+try:
+    from pdf_ocr_extractor import process_pdf_file
+    _PDF_EXTRACTOR_AVAILABLE = True
+except Exception as e:
+    print(f"Warning: pdf_ocr_extractor not available: {e}")
+    _PDF_EXTRACTOR_AVAILABLE = False
 
 # Load environment variables
 load_dotenv()
@@ -40,34 +55,102 @@ PDF_STORAGE = os.path.join(DATA_FOLDER, "pdfs")
 VECTORSTORE_PATH = os.path.join(BASE_DIR, "my_pdf_vectors")
 
 
-def get_db():
+# MongoDB setup (lazy connection - only connects when needed)
+_db_connection = None
+_chats_collection = None
+
+def get_mongodb_collection():
+    """Lazy MongoDB connection - only connects when chat history is actually needed."""
+    global _db_connection, _chats_collection
+    
+    if not _MONGO_AVAILABLE:
+        return None
+    
+    if _chats_collection is not None:
+        return _chats_collection
+    
     try:
-        mongo_url = os.getenv("MONGO_URL", "mongodb://localhost:27017/")
-        client = MongoClient(mongo_url, serverSelectionTimeoutMS=3000)
-        # Force connection on a request as the connect=True parameter of MongoClient seems
-        # to be useless here
-        client.server_info()  # Will throw exception if cannot connect
-        db = client["Steam-Karnival"]
-        print("MongoDB connection successful.")
-        return db
+        mongo_url = os.getenv("MONGO_URL", "")
+        if not mongo_url:
+            print("MONGO_URL not set - chat history will not be stored")
+            return None
+        
+        # For mongodb+srv:// (MongoDB Atlas), handle SSL handshake issues
+        if mongo_url.startswith("mongodb+srv://"):
+            try:
+                import dns.resolver
+            except ImportError:
+                print("ERROR: 'dnspython' is required for mongodb+srv:// connections.")
+                print("Install it with: pip install dnspython")
+                return None
+            
+            try:
+                # First attempt: Standard connection
+                client = MongoClient(mongo_url, serverSelectionTimeoutMS=10000)
+                client.server_info()
+                _db_connection = client["Steam-Karnival"]
+                _chats_collection = _db_connection['whatsapp_chats']
+                print("MongoDB connection successful.")
+                return _chats_collection
+            except Exception as ssl_error:
+                # If SSL handshake fails, try with relaxed TLS
+                if "SSL" in str(ssl_error) or "TLS" in str(ssl_error):
+                    print("SSL handshake failed, trying with relaxed TLS settings...")
+                    try:
+                        client = MongoClient(
+                            mongo_url,
+                            serverSelectionTimeoutMS=10000,
+                            tlsAllowInvalidCertificates=True
+                        )
+                        client.server_info()
+                        _db_connection = client["Steam-Karnival"]
+                        _chats_collection = _db_connection['whatsapp_chats']
+                        print("MongoDB connection successful with relaxed TLS.")
+                        return _chats_collection
+                    except Exception:
+                        print("MongoDB connection failed. Chat history will not be stored.")
+                        return None
+                else:
+                    print("MongoDB connection failed. Chat history will not be stored.")
+                    return None
+        else:
+            # For regular mongodb:// connections
+            client = MongoClient(mongo_url, serverSelectionTimeoutMS=10000)
+            client.server_info()
+            _db_connection = client["Steam-Karnival"]
+            _chats_collection = _db_connection['whatsapp_chats']
+            print("MongoDB connection successful.")
+            return _chats_collection
     except Exception as e:
-        print(f"Failed to connect to MongoDB: {e}")
+        print(f"MongoDB connection failed: {e}")
+        print("Chat history will not be stored. Continue without MongoDB.")
         return None
 
-db = get_db()
-chats_col = db['whatsapp_chats']
-
 def store_chat(user_mobile, timestamp, question, response):
-    chats_col.insert_one({
-        "user_mobile_number": user_mobile,
-        "user_timestamp": timestamp,
-        "user_question": question,
-        "response": response
-    })
+    """Store chat history in MongoDB."""
+    chats_col = get_mongodb_collection()
+    if chats_col is None:
+        return
+    try:
+        chats_col.insert_one({
+            "user_mobile_number": user_mobile,
+            "user_timestamp": timestamp,
+            "user_question": question,
+            "response": response
+        })
+    except Exception as e:
+        print(f"Error storing chat: {e}")
 
 def fetch_all_chats(user_mobile):
     """Fetch all chats for a user, ordered by timestamp (oldest first)."""
-    return list(chats_col.find({"user_mobile_number": user_mobile}).sort("user_timestamp", 1))
+    chats_col = get_mongodb_collection()
+    if chats_col is None:
+        return []
+    try:
+        return list(chats_col.find({"user_mobile_number": user_mobile}).sort("user_timestamp", 1))
+    except Exception as e:
+        print(f"Error fetching chats: {e}")
+        return []
 
 def find_excel_file():
     """Find the most recently modified Excel file in the PDF storage directory."""
@@ -127,7 +210,6 @@ DAY_MAPPING = {
 # Global cache for program data
 program_cache = {
     'excel_data': None,
-    'pdf_data': {},  # User-specific PDF data cache
     'last_excel_update': None,
     'processed_files': {},  # Track processed files and their timestamps
     'combined_data': None,  # Store combined data from all sources
@@ -143,7 +225,6 @@ def clear_schedule_cache():
     """Hard-reset all in-memory caches so old Excel content cannot persist."""
     try:
         program_cache['excel_data'] = None
-        program_cache['pdf_data'] = {}
         program_cache['last_excel_update'] = None
         program_cache['processed_files'] = {}
         program_cache['combined_data'] = None
@@ -154,32 +235,6 @@ def clear_schedule_cache():
         print(f"Error clearing cache: {e}")
         return False
 
-def list_pdf_files():
-    """List all files in the PDF storage directory"""
-    try:
-        all_files = os.listdir(PDF_STORAGE)
-        files_by_type = {
-            'pdf': [],
-            'json': [],
-            'txt': [],
-            'excel': []
-        }
-        
-        for file in all_files:
-            if file.endswith('.pdf'):
-                files_by_type['pdf'].append(file)
-            elif file.endswith('.json'):
-                files_by_type['json'].append(file)
-            elif file.endswith('.txt'):
-                files_by_type['txt'].append(file)
-            elif file.endswith(('.xlsx', '.xls')):
-                files_by_type['excel'].append(file)
-        
-        return files_by_type
-    except Exception as e:
-        print(f"Error listing PDF files: {e}")
-        return None
-
 def _faiss_index_exists():
     try:
         if not _FAISS_AVAILABLE:
@@ -188,34 +243,6 @@ def _faiss_index_exists():
         return os.path.exists(index_path)
     except Exception:
         return False
-
-def split_text_into_chunks(text: str, chunk_size: int = 1000, chunk_overlap: int = 150):
-    """Split text into chunks with overlap for FAISS indexing."""
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + chunk_size
-        chunks.append(text[start:end])
-        start = end - chunk_overlap
-    return chunks
-
-def create_faiss_from_text(text: str):
-    """Create and save FAISS vector store from text chunks."""
-    try:
-        if not _FAISS_AVAILABLE:
-            raise Exception("FAISS dependencies not available. Install langchain-openai and langchain-community")
-        
-        chunks = split_text_into_chunks(text, chunk_size=1000, chunk_overlap=150)
-        embeddings = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"))
-        vectorstore = FAISS.from_texts(chunks, embedding=embeddings)
-        
-        # Ensure directory exists
-        os.makedirs(VECTORSTORE_PATH, exist_ok=True)
-        vectorstore.save_local(VECTORSTORE_PATH)
-        return len(chunks)
-    except Exception as e:
-        print(f"Error creating FAISS index: {e}")
-        raise
 
 def get_pdf_chunks_context(question: str, k: int = 20):
     """Retrieve top-k chunks from FAISS vector store as additional context.
@@ -352,6 +379,52 @@ def build_query_terms(query: str):
     ]
     merged = list(dict.fromkeys(terms + bigrams + domain))
     return merged
+
+
+# --- Category normalization helpers ---
+def _roman_to_int(roman: str) -> int:
+    """Convert a (simple) Roman numeral up to 50 (L) to int. Returns 0 if invalid."""
+    if not roman:
+        return 0
+    values = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100}
+    total = 0
+    prev = 0
+    for ch in roman.upper():
+        val = values.get(ch, 0)
+        if val == 0:
+            return 0
+        if val > prev:
+            total += val - 2 * prev
+        else:
+            total += val
+        prev = val
+    return total
+
+
+def _normalize_category_label(text: str) -> str:
+    """
+    Normalize a category label to its numeric string (e.g., "CATEGORY IV" -> "4", "CAT-4" -> "4").
+    Returns empty string if nothing can be parsed.
+    """
+    if text is None:
+        return ""
+    s = str(text).strip().upper()
+    # Remove common tokens and separators
+    for token in ["CATEGORY", "CATEGORIES", "CAT", "-", ":", "/", "(", ")"]:
+        s = s.replace(token, " ")
+    s = " ".join(s.split())  # collapse whitespace
+    # Prefer digits if present
+    m = re.findall(r"\d+", s)
+    if m:
+        return str(int(m[-1]))
+    # Otherwise try roman numerals
+    parts = s.split()
+    for part in reversed(parts):
+        if re.fullmatch(r"[IVXLC]+", part):
+            val = _roman_to_int(part)
+            if val > 0:
+                return str(val)
+    return ""
 
 def extract_structured_section(raw_text: str, section_headers, max_scan_chars: int = 4000):
     """Extract a section that starts with any of the section_headers and return
@@ -508,84 +581,13 @@ def build_excel_context_rows(all_programs, query_terms, max_rows=30):
     if not rows:
         return ""
     def fmt(p):
-        name = p.get('Program Name', 'Unknown')
+        name = p.get('Item', 'Unknown')
         cat = p.get('Category', 'N/A')
-        stage = p.get('Stage', '')
+        time = p.get('Time', '')
         date = p.get('Date', '')
         code = p.get('Item Code', '')
-        time = p.get('Time', '')
-        return f"- {name} | Category: {cat} | Stage: {stage} | Date: {date} | Item Code: {code} | Time: {time}"
+        return f"- {name} | Category: {cat} | Time: {time} | Date: {date} | Item Code: {code}"
     return "\n".join(fmt(p) for p in rows)
-
-def ensure_pdfs_indexed():
-    """Ensure all PDFs in storage have extracted text and JSON data.
-    For each .pdf in `PDF_STORAGE`, if corresponding .json is missing,
-    extract text and process into structured data using existing helpers.
-    """
-    try:
-        all_files = os.listdir(PDF_STORAGE)
-        pdf_files = [f for f in all_files if f.lower().endswith('.pdf')]
-        for pdf_file in pdf_files:
-            base_name = os.path.splitext(pdf_file)[0]
-            json_path = os.path.join(PDF_STORAGE, base_name + '.json')
-            txt_path = os.path.join(PDF_STORAGE, base_name + '.txt')
-
-            # Skip if JSON already exists
-            if os.path.exists(json_path):
-                continue
-
-            pdf_path = os.path.join(PDF_STORAGE, pdf_file)
-            try:
-                # Read file bytes and extract text
-                with open(pdf_path, 'rb') as f:
-                    pdf_buffer = io.BytesIO(f.read())
-                extracted_text = extract_text_from_pdf(pdf_buffer)
-
-                if not extracted_text:
-                    print(f"No text extracted from {pdf_file}; skipping JSON generation.")
-                    continue
-
-                # Save extracted text
-                try:
-                    with open(txt_path, 'w', encoding='utf-8') as tf:
-                        tf.write(extracted_text)
-                except Exception as te:
-                    print(f"Error writing TXT for {pdf_file}: {te}")
-
-                # Process into structured data and save JSON
-                structured = process_pdf_content(extracted_text)
-                try:
-                    with open(json_path, 'w', encoding='utf-8') as jf:
-                        json.dump(structured, jf, indent=2)
-                except Exception as je:
-                    print(f"Error writing JSON for {pdf_file}: {je}")
-            except Exception as pe:
-                print(f"Error indexing PDF {pdf_file}: {pe}")
-    except Exception as e:
-        print(f"Error ensuring PDFs indexed: {e}")
-
-def get_all_pdf_data():
-    """Load data from all JSON files in the PDF storage"""
-    try:
-        json_files = [f for f in os.listdir(PDF_STORAGE) if f.endswith('.json')]
-        all_data = []
-        
-        for json_file in json_files:
-            try:
-                with open(os.path.join(PDF_STORAGE, json_file), 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        all_data.extend(data)
-                    else:
-                        all_data.append(data)
-            except Exception as e:
-                print(f"Error reading {json_file}: {e}")
-                continue
-        
-        return all_data
-    except Exception as e:
-        print(f"Error getting all PDF data: {e}")
-        return []
 
 def update_cache_if_needed():
     """Update the combined data cache if any files have changed"""
@@ -600,9 +602,9 @@ def update_cache_if_needed():
         all_files = os.listdir(PDF_STORAGE)
         current_files = {}
         
-        # Check all relevant files
+        # Check all relevant files (only Excel now - PDF processing removed)
         for file in all_files:
-            if file.endswith(('.pdf', '.json', '.xlsx', '.xls')):
+            if file.endswith(('.xlsx', '.xls')):
                 file_path = os.path.join(PDF_STORAGE, file)
                 current_files[file] = os.path.getmtime(file_path)
                 
@@ -621,13 +623,7 @@ def update_cache_if_needed():
             # Update Excel data
             update_excel_cache()
             
-            # Ensure any new PDFs are indexed to TXT/JSON
-            ensure_pdfs_indexed()
-
-            # Get all PDF data
-            all_pdf_data = get_all_pdf_data()
-            
-            # Combine all data
+            # Combine all data (Excel only - PDF extraction removed)
             combined_data = []
             
             # Add Excel data if available
@@ -635,42 +631,31 @@ def update_cache_if_needed():
                 for _, row in program_cache['excel_data'].iterrows():
                     try:
                         # Get data from row using column names
-                        stage = str(row['Stage']).strip()
-                        program_name = str(row['Program']).strip()
+                        time = str(row['Time']).strip()
+                        item_name = str(row['Item']).strip()
                         category = str(row['Category']).strip()
                         date = str(row['Date']).strip()
                         
                         # Skip empty or invalid rows
-                        if not program_name or program_name.lower() == 'nan':
+                        if not item_name or item_name.lower() == 'nan':
                             continue
                             
                         # Get day name for the date
                         day_name = DATE_MAPPING.get(date, "")
                         
                         program = {
-                            "Program Name": program_name,
+                            "Item": item_name,
                             "Category": category if category != "nan" else "N/A",
-                            "Stage": stage,
+                            "Time": time,
                             "Date": date,
                             "Day": day_name,
                             "Source": "excel"
                         }
                         
-                        print(f"Added program: {program_name} on {date} ({day_name}) at {stage}")  # Debug print
+                        print(f"Added item: {item_name} on {date} ({day_name}) at {time}")  # Debug print
                         combined_data.append(program)
                     except Exception as e:
                         print(f"Error processing Excel row: {e}")
-                        continue
-            
-            # Add PDF data
-            if all_pdf_data:
-                for program in all_pdf_data:
-                    try:
-                        program_copy = program.copy()
-                        program_copy["Source"] = "pdf"
-                        combined_data.append(program_copy)
-                    except Exception as e:
-                        print(f"Error processing PDF data: {e}")
                         continue
             
             # Don't remove duplicates - we want all programs even if names are same
@@ -723,9 +708,9 @@ def update_excel_cache():
                     print(df[col].unique())
                 
                 # Dynamically rename columns for schedule Excel file
-                # Accepts various headers: Time (Stage), Item (Program), Category, Date
+                # Accepts various headers: Time, Item, Category, Date
                 map_cols = {}
-                wanted = {'Stage': ['stage', 'time'], 'Program': ['program', 'item'], 'Category': ['category'], 'Date': ['date']}
+                wanted = {'Time': ['time'], 'Item': ['item'], 'Category': ['category'], 'Date': ['date']}
                 for wanted_col, options in wanted.items():
                     for col in df.columns:
                         col_lower = str(col).strip().lower()
@@ -737,7 +722,7 @@ def update_excel_cache():
                             break
                 # Fill in missing mappings by guessing by position if not found and only 4 columns
                 if len(map_cols) < 4 and len(df.columns) == 4:
-                    map_order = ['Stage', 'Program', 'Category', 'Date']
+                    map_order = ['Time', 'Item', 'Category', 'Date']
                     for idx, want in enumerate(map_order):
                         if want not in map_cols:
                             map_cols[want] = df.columns[idx]
@@ -759,20 +744,20 @@ def update_excel_cache():
                 print("Rows before:", len(df))
                 # Remove any empty rows
                 df = df.dropna(how='all')
-                df = df[df['Program'].str.len() > 0]
+                df = df[df['Item'].str.len() > 0]
                 # Remove header-like rows that leaked into data
-                header_like_programs = {"program", "program name", "programme", "programs", "programmes"}
-                header_like_stages = {"stage", "stages"}
+                header_like_items = {"item", "items", "program", "program name", "programme", "programs", "programmes"}
+                header_like_times = {"time", "times", "stage", "stages"}
                 header_like_categories = {"category", "categories"}
                 header_like_dates = {"date", "dates"}
-                df = df[~df['Program'].str.strip().str.lower().isin(header_like_programs)]
-                df = df[~df['Stage'].str.strip().str.lower().isin(header_like_stages)]
+                df = df[~df['Item'].str.strip().str.lower().isin(header_like_items)]
+                df = df[~df['Time'].str.strip().str.lower().isin(header_like_times)]
                 df = df[~df['Category'].str.strip().str.lower().isin(header_like_categories)]
                 df = df[~df['Date'].str.strip().str.lower().isin(header_like_dates)]
                 # Also drop rows where all four columns equal their header tokens
                 df = df[~(
-                    df['Stage'].str.strip().str.upper().eq('STAGE') &
-                    df['Program'].str.strip().str.upper().eq('PROGRAM') &
+                    df['Time'].str.strip().str.upper().eq('TIME') &
+                    df['Item'].str.strip().str.upper().eq('ITEM') &
                     df['Category'].str.strip().str.upper().eq('CATEGORY') &
                     df['Date'].str.strip().str.upper().eq('DATE')
                 )]
@@ -802,36 +787,6 @@ def update_excel_cache():
         program_cache['excel_data'] = pd.DataFrame()
         program_cache['last_excel_update'] = None
 
-def get_cached_pdf_data(user_number):
-    """Get PDF data from cache or load if needed"""
-    global program_cache
-    
-    # Clean the phone number for filename matching
-    safe_number = user_number.replace(':', '_').replace('+', '')
-    
-    # Check if we have cached data for this user
-    if safe_number not in program_cache['pdf_data']:
-        try:
-            # List all JSON files for this user
-            json_files = [f for f in os.listdir(PDF_STORAGE) 
-                         if f.endswith('.json') and safe_number in f]
-            
-            if json_files:
-                # Get the most recent JSON file
-                latest_json = sorted(json_files)[-1]
-                json_path = os.path.join(PDF_STORAGE, latest_json)
-                
-                # Load and cache the data
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    program_cache['pdf_data'][safe_number] = json.load(f)
-            else:
-                program_cache['pdf_data'][safe_number] = None
-                
-        except Exception as e:
-            print(f"Error loading PDF data: {e}")
-            program_cache['pdf_data'][safe_number] = None
-    
-    return program_cache['pdf_data'].get(safe_number)
 
 
 from pydantic import BaseModel
@@ -910,55 +865,93 @@ async def test_webhook(message: str = None, test_body: TestMessage = None):
 async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...), MediaUrl0: str = Form(None)):
     """
     Webhook endpoint for Twilio WhatsApp messages.
-    Handle both text queries and PDF attachments.
+    Handles text queries, PDF uploads (processed via pdf_ocr_extractor.py), and FAISS semantic search.
     """
     user_message = Body.strip()
     user_number = From
 
     print(f" Message from {user_number}: {user_message}")
 
-    # Handle PDF attachment if present
+    # Handle PDF attachment if present - delegate to pdf_ocr_extractor.py
     if MediaUrl0 and MediaUrl0.lower().endswith('.pdf'):
         try:
+            if not _PDF_EXTRACTOR_AVAILABLE:
+                send_whatsapp_message(user_number, 
+                    "Sorry, PDF processing is not available. Please contact the administrator.")
+                return {"status": "error", "message": "PDF extractor not available"}
+            
             # Download PDF from Twilio's media URL
-            import requests
             response = requests.get(MediaUrl0)
+            
             # Generate a unique filename using timestamp and user number
             timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
             safe_number = user_number.replace(':', '_').replace('+', '')
             pdf_filename = f"program_schedule_{timestamp}_{safe_number}.pdf"
             pdf_path = os.path.join(PDF_STORAGE, pdf_filename)
+            
             # Save PDF to file
             with open(pdf_path, 'wb') as pdf_file:
                 pdf_file.write(response.content)
-            # Create buffer for processing
-            pdf_buffer = io.BytesIO(response.content)
-            # Extract text from PDF
-            pdf_text = extract_text_from_pdf(pdf_buffer)
-            if pdf_text:
-                # Save extracted text alongside PDF
-                text_filename = pdf_filename.replace('.pdf', '.txt')
-                text_path = os.path.join(PDF_STORAGE, text_filename)
-                with open(text_path, 'w', encoding='utf-8') as text_file:
-                    text_file.write(pdf_text)
-                # Process PDF content into structured data
-                pdf_data = process_pdf_content(pdf_text)
-                # Save structured data as JSON
-                json_filename = pdf_filename.replace('.pdf', '.json')
-                json_path = os.path.join(PDF_STORAGE, json_filename)
-                with open(json_path, 'w', encoding='utf-8') as json_file:
-                    json.dump(pdf_data, json_file, indent=2)
+            
+            print(f"PDF saved to: {pdf_path}")
+            
+            # Process PDF using pdf_ocr_extractor.py - this will extract text and create FAISS embeddings
+            print("Processing PDF with pdf_ocr_extractor.py...")
+            result = process_pdf_file(
+                pdf_path=pdf_path,
+                output_dir=PDF_STORAGE,
+                create_faiss=True,  # Create FAISS embeddings
+                faiss_output=VECTORSTORE_PATH  # Use the same vectorstore path as main_demo.py
+            )
+            
+            if result.get('status') == 'success':
+                chunks_count = result.get('chunks', 0)
                 send_whatsapp_message(user_number, 
-                    "I've received and processed your PDF. The schedule has been saved and I can now answer questions about it!")
-                return {"status": "ok", "message": "PDF processed and confirmed"}
+                    f"I've received and processed your PDF! Extracted {result.get('text_length', 0):,} characters and created {chunks_count} embeddings. You can now ask me questions about it!")
+                return {"status": "ok", "message": "PDF processed and embeddings created"}
+            else:
+                error_msg = result.get('message', 'Unknown error')
+                send_whatsapp_message(user_number, 
+                    f"Sorry, I had trouble processing that PDF: {error_msg}")
+                return {"status": "error", "message": error_msg}
+                
         except Exception as e:
             print(f"Error processing PDF: {e}")
+            import traceback
+            traceback.print_exc()
             send_whatsapp_message(user_number, 
                 "Sorry, I had trouble processing that PDF. Could you try sending it again?")
             return {"status": "error", "message": str(e)}
 
-    # --- Normal chat logic when no PDF ---
-    extracted = extract_query_info(user_message)
+    # --- Normal chat logic ---
+    # Step 1: Quick greeting check (before followup analysis for faster response)
+    quick_extracted = extract_query_info(user_message)
+    if quick_extracted.get("is_greeting", False) or quick_extracted.get("query_type") == "greeting":
+        msg_lower = user_message.lower()
+        if "bye" in msg_lower or "goodbye" in msg_lower:
+            greeting_reply = "Goodbye! Feel free to ask me about any programs later. I'm here to help!"
+        elif "good morning" in msg_lower or ("morning" in msg_lower and "hi" in msg_lower):
+            greeting_reply = "Good morning! I'm your Kalolsavam assistant. How can I help you today? You can ask me about any programs, venues, or schedules!"
+        elif "good afternoon" in msg_lower:
+            greeting_reply = "Good afternoon! I'm your Kalolsavam assistant. How can I help you today? You can ask me about any programs, venues, or schedules!"
+        elif "good evening" in msg_lower:
+            greeting_reply = "Good evening! I'm your Kalolsavam assistant. How can I help you today? You can ask me about any programs, venues, or schedules!"
+        elif "thank" in msg_lower:
+            greeting_reply = "You're welcome! Let me know if you need anything else!"
+        elif "how are you" in msg_lower:
+            greeting_reply = "I'm doing great, thank you for asking! I'm ready to help you with any information about the Kalolsavam programs. What would you like to know?"
+        else:
+            greeting_reply = "Hello! I'm your Kalolsavam assistant. I can help you with program schedules, venues, and timings. What would you like to know?"
+        
+        send_whatsapp_message(user_number, greeting_reply)
+        store_chat(
+            user_mobile=user_number,
+            timestamp=datetime.utcnow(),
+            question=user_message,
+            response=greeting_reply
+        )
+        return {"status": "ok", "message": "Greeting handled"}
+    
     # Step 2: Get chat history (last 5 turns) for intelligent follow-up detection
     chat_history_entries = fetch_all_chats(user_number)
     recent_entries = chat_history_entries[-5:] if len(chat_history_entries) > 5 else chat_history_entries
@@ -970,26 +963,35 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...), MediaUr
         )
     chat_history += f"User (now): {user_message}\n"
 
-    # AI-driven follow-up analysis (no hardcoded indicators)
+    # Step 3: AI-driven follow-up analysis (no hardcoded indicators)
     final_query = user_message
+    is_followup = False
     try:
         followup_resp = client.chat.completions.create(
             model="gpt-3.5-turbo",
             temperature=0,
             messages=[
                 {"role": "system", "content": "You are the Receptionist for Kalsolavm. Decide if the user's latest message is a follow-up to the prior conversation. Return strict JSON only."},
-                {"role": "user", "content": f"Conversation so far (last 5 turns):\n{chat_history}\n\nTask: Is the latest message a follow-up to the previous topic? If yes, rewrite it into a standalone query that includes the missing context.\nReturn JSON: {{\"is_followup\": true|false, \"standalone_query\": \"...\"}}"}
+                {"role": "user", "content": f"Conversation so far (last 5 turns):\n{chat_history}\n\nTask: Is the latest message a follow-up to the previous topic? \n\nIf YES, rewrite it into a COMPLETE standalone query that includes ALL context from previous messages:\n- If previous query mentioned a time (e.g., 'after 2 pm'), include it in the standalone query\n- If previous query mentioned a date or day (e.g., 'Saturday', '12-11-2025'), include it in the standalone query\n- If previous query mentioned a category (e.g., 'category 4'), include it in the standalone query\n- Combine ALL filters from the conversation into one complete query\n\nExample: If user asked 'what items after 2 pm on Saturday?' and then asks 'only category 4', the standalone query should be 'what are the category 4 items after 2 pm on Saturday?'\n\nReturn JSON: {{\"is_followup\": true|false, \"standalone_query\": \"...\"}}"}
             ]
         )
         raw = followup_resp.choices[0].message.content.strip()
+        print(f"DEBUG: Followup analysis raw response: {raw}")
         try:
             data = json.loads(raw)
-            if isinstance(data, dict) and data.get("standalone_query"):
-                final_query = str(data["standalone_query"]).strip()
-        except Exception:
-            pass
+            if isinstance(data, dict):
+                is_followup = data.get("is_followup", False)
+                if data.get("standalone_query"):
+                    final_query = str(data["standalone_query"]).strip()
+                    print(f"DEBUG: Followup detected! Original: '{user_message}' -> Expanded: '{final_query}'")
+        except Exception as e:
+            print(f"DEBUG: Failed to parse followup JSON: {e}")
     except Exception as e:
         print(f"follow-up analysis failed: {e}")
+    
+    # Step 4: Extract query info from the FINAL query (expanded if it was a followup)
+    extracted = extract_query_info(final_query)
+    print(f"DEBUG: Query extraction - Original: '{user_message}', Final: '{final_query}', Is Followup: {is_followup}")
     try:
         program_cache['combined_data'] = None
         program_cache['excel_data'] = None
@@ -998,10 +1000,58 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...), MediaUr
         combined_data = update_cache_if_needed()
         # Use AI-generated standalone query if it's a follow-up; otherwise the original message
         ai_response = search_program_data(extracted, final_query, combined_data)
+        print(f"DEBUG: search_program_data returned: {ai_response[:200] if ai_response else 'None'}...")
     except Exception as e:
+        print(f"ERROR in search_program_data: {e}")
+        import traceback
+        traceback.print_exc()
         ai_response = ("I'm having trouble accessing the program data right now. "
                        "Please try again in a moment.")
-    final_reply = generate_human_like_reply(user_message, ai_response)
+    
+    # Check if this is a time query that already has a formatted list response
+    # If so, skip LLM rewriting which might filter out valid results
+    # Use final_query (not user_message) to detect time queries in followups
+    time_patterns = re.findall(r'\b(\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM))\b', final_query, re.IGNORECASE)
+    is_time_query = bool(time_patterns) or ("at" in final_query.lower() and ("pm" in final_query.lower() or "am" in final_query.lower()))
+    has_formatted_list = ai_response and ("At " in ai_response or "items are scheduled:" in ai_response or "• " in ai_response)
+    
+    # Also check if it's a category query with formatted response
+    is_category_query = extracted.get("query_type") == "category" or (extracted.get("category") and not is_time_query)
+    has_category_list = ai_response and ("Category" in ai_response or "• " in ai_response or "*Category" in ai_response)
+    
+    # Check if this is a duration query or remarks query (should use PDF data and might have formatted response)
+    final_query_lower = final_query.lower()
+    is_duration_query = any(term in final_query_lower for term in [
+        "duration", "how long", "length", "time period", "running time"
+    ])
+    has_duration_info = ai_response and (("min" in ai_response.lower() or "mins" in ai_response.lower() or "minute" in ai_response.lower()) and any(c.isdigit() for c in ai_response))
+    
+    # Check if this is a remarks/notes query
+    is_remarks_query = any(term in final_query_lower for term in [
+        "remark", "remarks", "note", "notes", "comment", "comments", "additional", "detail", "info"
+    ])
+    has_remarks_info = ai_response and (("common" in ai_response.lower() or "participants" in ai_response.lower() or "(" in ai_response) and len(ai_response) > 50)
+    
+    print(f"DEBUG: is_time_query={is_time_query}, is_category_query={is_category_query}, is_duration_query={is_duration_query}, is_remarks_query={is_remarks_query}, has_formatted_list={has_formatted_list}, has_category_list={has_category_list}, has_duration_info={has_duration_info}, has_remarks_info={has_remarks_info}")
+    
+    if (is_time_query and has_formatted_list) or (is_category_query and has_category_list) or (is_duration_query and has_duration_info) or (is_remarks_query and has_remarks_info):
+        # Already formatted correctly, use as-is
+        if is_time_query:
+            print("Time query with formatted response - skipping LLM rewrite")
+        elif is_category_query:
+            print("Category query with formatted response - skipping LLM rewrite")
+        elif is_duration_query:
+            print("Duration query with formatted response - skipping LLM rewrite")
+        elif is_remarks_query:
+            print("Remarks query with formatted response - skipping LLM rewrite")
+        final_reply = ai_response
+    else:
+        # Use LLM to rewrite for better naturalness
+        # Use final_query (not user_message) so LLM understands the expanded followup query
+        print("Using LLM to rewrite response")
+        final_reply = generate_human_like_reply(final_query, ai_response)
+    
+    print(f"DEBUG: Final reply to send: {final_reply[:200]}...")
     send_result = send_whatsapp_message(user_number, final_reply)
     # Store the chat with full details
     store_chat(
@@ -1029,7 +1079,10 @@ def extract_query_info(message: str):
                 - Stage queries (e.g., "What's happening in Stage 2?", "Stage 2 programs")
                 - Category queries (e.g., "What are the category one programmes?", "Show cat 1 programs", "Category 2 events")
                   Extract category number (1, 2, 3, 4, etc.) and set query_type to "category"
-                - Time queries (e.g., "morning programs", "What's at 10 AM?")
+                - Time queries (e.g., "morning programs", "What's at 10 AM?", "after 2 pm", "before 3 pm", "past 2", "later than 2 pm")
+                  For time queries, extract:
+                  * The time itself (e.g., "2 pm", "10:00 AM", "14:00")
+                  * Time comparison: "after" (for "after", "past", "later than", "from"), "before" (for "before", "earlier than", "until"), or "" for exact time queries
                 - Date queries (e.g., "What's on 15-11-2025?", "programs on November 15", "What is in the 15-11-2025", "What's happening tomorrow?")
                   For dates, understand and convert any date format to a standard format
                 - Day queries (e.g., "What's happening on Saturday?", "Friday's programs", "What's on FRI?")
@@ -1050,7 +1103,8 @@ def extract_query_info(message: str):
                 - program: Program name or "" if not specific
                 - stage: Stage number (just the number) or "" if not mentioned
                 - category: Category number (1, 2, 3, 4) or "" if not mentioned
-                - time: Time period mentioned or "" if none
+                - time: Time mentioned (e.g., "2 pm", "10:00 AM", "14:00") or "" if none. Extract the time value itself without comparison words.
+                - time_comparison: "after" if query asks for times after/beyond/past/later than the time, "before" if query asks for times before/earlier than/until the time, or "" for exact time queries (e.g., "at 2 pm", "2 pm programs")
                 - date: Date in DD-MM-YYYY format or "" if not mentioned
                 - day: Day name (e.g., "FRIDAY", "SAT") or "" if not mentioned
                 - venue: Venue name (e.g., "auditorium", "hall") or "" if not mentioned
@@ -1064,88 +1118,16 @@ def extract_query_info(message: str):
             ],
             response_format={"type": "json_object"}
         )
-        return json.loads(response.choices[0].message.content)
+        result = json.loads(response.choices[0].message.content)
+        # Ensure time_comparison field exists (for backward compatibility)
+        if "time_comparison" not in result:
+            result["time_comparison"] = ""
+        return result
     except Exception as e:
         print(" OpenAI extract error:", e)
-        return {"program": "", "stage": "", "category": "", "time": "", "date": "", "day": "", "venue": "", "query_type": "general", "is_greeting": False}
+        return {"program": "", "stage": "", "category": "", "time": "", "time_comparison": "", "date": "", "day": "", "venue": "", "query_type": "general", "is_greeting": False}
 
 
-def load_pdf_data(user_number):
-    """
-    Load the most recent PDF data for a given user number
-    """
-    try:
-        # Clean the phone number for filename matching
-        safe_number = user_number.replace(':', '_').replace('+', '')
-        
-        # List all JSON files for this user
-        json_files = [f for f in os.listdir(PDF_STORAGE) 
-                     if f.endswith('.json') and safe_number in f]
-        
-        if not json_files:
-            return None
-            
-        # Get the most recent JSON file
-        latest_json = sorted(json_files)[-1]
-        json_path = os.path.join(PDF_STORAGE, latest_json)
-        
-        # Load and return the data
-        with open(json_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error loading PDF data: {e}")
-        return None
-
-def combine_program_data(excel_data, pdf_data):
-    """
-    Combine program data from Excel and PDF sources
-    """
-    combined_data = []
-    
-    # Add Excel data if available and not empty
-    if not excel_data.empty:
-        try:
-            for _, row in excel_data.iterrows():
-                try:
-                    program = {
-                        "Program Name": str(row.get("Program Name", "Unknown Program")),
-                        "Category": str(row.get("Category", "N/A")),
-                        "Venue": str(row.get("Venue", "N/A")),
-                        "Stage": str(row.get("Stage", "N/A")),
-                        "Time": (f"{row.get('Start Time', 'N/A')} to "
-                               f"{row.get('End Time', 'N/A')}"),
-                        "Participants": str(row.get("Participants", "N/A")),
-                        "Source": "excel"
-                    }
-                    combined_data.append(program)
-                except Exception as e:
-                    print(f"Error processing Excel row: {e}")
-                    continue
-        except Exception as e:
-            print(f"Error processing Excel data: {e}")
-    
-    # Add PDF data if available
-    if pdf_data:
-        try:
-            for program in pdf_data:
-                try:
-                    program_copy = program.copy()  # Create a copy to avoid modifying original
-                    program_copy["Source"] = "pdf"
-                    # Ensure all required fields exist with defaults
-                    program_copy.setdefault("Program Name", "Unknown Program")
-                    program_copy.setdefault("Category", "N/A")
-                    program_copy.setdefault("Venue", "N/A")
-                    program_copy.setdefault("Stage", "N/A")
-                    program_copy.setdefault("Time", "Time not specified")
-                    program_copy.setdefault("Participants", "N/A")
-                    combined_data.append(program_copy)
-                except Exception as e:
-                    print(f"Error processing PDF program: {e}")
-                    continue
-        except Exception as e:
-            print(f"Error processing PDF data: {e}")
-    
-    return combined_data
 
 def search_program_data(extracted, user_message, combined_data=None):
     """
@@ -1159,6 +1141,68 @@ def search_program_data(extracted, user_message, combined_data=None):
     # Print debug info
     print(f"Total programs in data: {len(combined_data)}")
     
+    # Helper function to format time to 12-hour format (e.g., "15:30:00" -> "3:30 PM")
+    def format_time_for_answer(time_str):
+        """Convert time to 12-hour format with AM/PM"""
+        if not time_str or time_str == "Unknown time" or str(time_str).strip() == "":
+            return str(time_str).strip() if time_str else "Unknown time"
+        
+        time_str_clean = str(time_str).strip()
+        
+        # If already in 12-hour format (contains AM/PM), return as is (but clean up if needed)
+        if "AM" in time_str_clean.upper() or "PM" in time_str_clean.upper():
+            return time_str_clean
+        
+        try:
+            # Try to parse various 24-hour formats: "15:30:00", "15:30", "1530", etc.
+            # Extract hour and minute using regex
+            time_match = re.search(r'(\d{1,2}):(\d{2})(?::(\d{2}))?', time_str_clean)
+            if time_match:
+                hour = int(time_match.group(1))
+                minute = int(time_match.group(2))
+                
+                # Convert to 12-hour format
+                if hour == 0:
+                    hour_12 = 12
+                    am_pm = "AM"
+                elif hour < 12:
+                    hour_12 = hour
+                    am_pm = "AM"
+                elif hour == 12:
+                    hour_12 = 12
+                    am_pm = "PM"
+                else:
+                    hour_12 = hour - 12
+                    am_pm = "PM"
+                
+                return f"{hour_12}:{minute:02d} {am_pm}"
+            else:
+                # Try to parse as just hour without colon (e.g., "1530" -> 15:30)
+                hour_match = re.search(r'^(\d{2})(\d{2})$', time_str_clean)
+                if hour_match:
+                    hour = int(hour_match.group(1))
+                    minute = int(hour_match.group(2))
+                    
+                    if hour == 0:
+                        hour_12 = 12
+                        am_pm = "AM"
+                    elif hour < 12:
+                        hour_12 = hour
+                        am_pm = "AM"
+                    elif hour == 12:
+                        hour_12 = 12
+                        am_pm = "PM"
+                    else:
+                        hour_12 = hour - 12
+                        am_pm = "PM"
+                    
+                    return f"{hour_12}:{minute:02d} {am_pm}"
+        except Exception as e:
+            print(f"Error formatting time '{time_str_clean}': {e}")
+        
+        # Fallback: return original string if we can't parse it
+        return time_str_clean
+    
     # Try to load manual text for AI-powered search
     manual_path = os.path.join(PDF_STORAGE, "Manual State 2025 (2).txt")
     manual_text = ""
@@ -1168,6 +1212,27 @@ def search_program_data(extracted, user_message, combined_data=None):
                 manual_text = f.read()
         except Exception as e:
             print(f"Error loading manual text: {e}")
+    
+    # ALWAYS retrieve PDF chunks from FAISS embeddings FIRST (before any early returns)
+    # This ensures semantic search is always performed, even when Excel has data
+    print("\n" + "="*60)
+    print("=== RETRIEVING PDF CHUNKS FROM FAISS ===")
+    print("="*60)
+    question_words = user_message.lower().split()
+    question_lower = user_message.lower()
+    
+    # Increase chunks for questions likely to need table/chart/structured data or value points
+    is_value_points_query = any(term in question_lower for term in ["value point", "value points", "marks", "mark"])
+    is_complex_query = len(question_words) > 5 or any(c in user_message for c in ["%", "table", "chart", "list"])
+    
+    # For value points queries, retrieve more chunks to ensure we find the scoring tables
+    # For time queries (like "anchoring time"), also retrieve more chunks
+    # For remarks queries, retrieve more chunks to find item details
+    is_time_query = any(term in question_lower for term in ["time", "when", "at what time", "timing", "schedule"])
+    is_remarks_query_check = any(term in question_lower for term in ["remark", "remarks", "note", "notes", "comment", "comments"])
+    k_value = 30 if (is_value_points_query or is_remarks_query_check) else (25 if is_complex_query or is_time_query else 20)
+    pdf_chunks = get_pdf_chunks_context(user_message, k=k_value)
+    print(f"Retrieved {len(pdf_chunks)} characters from FAISS embeddings")
     
     # Build query terms for manual/excel search
     query_terms = build_query_terms(user_message)
@@ -1186,11 +1251,11 @@ def search_program_data(extracted, user_message, combined_data=None):
     if is_stage_count_query:
         stages = set()
         for prog in (combined_data or []):
-            stage_raw = str(prog.get("Stage", "")).strip()
-            if not stage_raw:
+            time_raw = str(prog.get("Time", "")).strip()
+            if not time_raw:
                 continue
             # Extract numeric part and ignore header-like rows
-            m = re.search(r"(\d+)", stage_raw)
+            m = re.search(r"(\d+)", time_raw)
             if not m:
                 continue
             stages.add(int(m.group(1)))
@@ -1199,49 +1264,313 @@ def search_program_data(extracted, user_message, combined_data=None):
             return f"There are {total} stages in Kalolsavam."
         return "I couldn't find stage information in the schedule data."
 
-    # Check if this is a program/stage/schedule question - prioritize Excel data
-    is_schedule_question = any(term in user_message.lower() for term in [
-        "stage", "performing", "program", "schedule", "date", "when is", 
-        "where is", "which stage", "what stage", "at what"
+    # Check if this is a factual query that should use PDF/manual data (fees, marks, phones, etc.)
+    user_msg_lower = user_message.lower()
+    is_factual_query = any(term in user_msg_lower for term in [
+        "phone", "number", "contact", "email", "address", "how much", "fee", 
+        "cost", "price", "value point", "value points", "marks", "mark", 
+        "point", "points", "appeal", "grade", "percentage", "trophy", "trophies",
+        "website", "url", "register", "registration", "password", "accessible",
+        "duration", "how long", "length", "time period", "mins", "minutes", 
+        "hrs", "hours", "hr", "mts", "mt", "running time", "remark", "remarks",
+        "note", "notes", "comment", "comments", "additional", "info", "detail",
+        "office", "kalotsav office", "call", "mobile"
     ])
     
+    # Check if this is a program/stage/schedule question - prioritize Excel data
+    # Also include time queries like "1 pm", "1:00 PM", "items at 1 pm", etc.
+    # Include program name queries (user asking about a specific program)
+    is_schedule_question = any(term in user_msg_lower for term in [
+        "stage", "performing", "program", "schedule", "date", "when is", 
+        "where is", "which stage", "what stage", "at what", "items", "item",
+        "happening", "at", "pm", "am", "time", "what are", "which items",
+        "what is", "tell me about", "when", "where"
+    ])
+    
+    # Extract time from query if present (e.g., "1 pm", "1:00 PM", "13:00")
+    # Use AI-extracted values if available, otherwise fall back to regex
+    time_query = extracted.get("time", "").strip().lower() if extracted else ""
+    time_comparison = extracted.get("time_comparison", "").strip().lower() if extracted else None
+    time_comparison = time_comparison if time_comparison else None  # Convert empty string to None
+    
+    # Fallback: Also check user_message directly for time patterns if AI didn't extract it
+    if not time_query:
+        time_patterns = re.findall(r'\b(\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM))\b', user_message, re.IGNORECASE)
+        if time_patterns:
+            time_query = time_patterns[0].lower()
+    
+    # Fallback: Detect "after" or "before" if AI didn't extract it
+    if not time_comparison and time_query:
+        user_msg_lower_check = user_message.lower()
+        if any(word in user_msg_lower_check for word in ["after", "past", "later than", "from"]):
+            time_comparison = "after"
+        elif any(word in user_msg_lower_check for word in ["before", "earlier than", "until"]):
+            time_comparison = "before"
+    
     # For schedule questions, search Excel first before PDF chunks
-    if is_schedule_question and combined_data:
+    # Skip Excel search for factual queries (fees, marks, phones, etc.) - they need PDF data
+    if (is_schedule_question or time_query) and combined_data and not is_factual_query:
         print("\nThis is a schedule question - prioritizing Excel data...")
+        print(f"DEBUG: combined_data has {len(combined_data)} items")
         # Restrict to Excel rows first (fallback to all only if Excel missing)
-        excel_rows = [p for p in combined_data if p.get("Source") == "excel"] or combined_data
+        excel_rows = [p for p in combined_data if p.get("Source") == "excel"]
+        if not excel_rows:
+            print("WARNING: No Excel rows found in combined_data, falling back to all data")
+            excel_rows = combined_data
+        else:
+            print(f"DEBUG: Found {len(excel_rows)} Excel rows")
 
         # Strong exact/containment name match pass
         msg_upper = user_message.upper()
         exact_name_matches = []
         for program in excel_rows:
-            program_name_upper = program.get("Program Name", "").strip().upper()
-            if program_name_upper and (program_name_upper in msg_upper or msg_upper in program_name_upper):
+            item_name_upper = program.get("Item", "").strip().upper()
+            if item_name_upper and (item_name_upper in msg_upper or msg_upper in item_name_upper):
                 exact_name_matches.append(program)
 
         matching_programs = []
-        if exact_name_matches:
-            matching_programs = exact_name_matches
-        else:
-            # Fallback to token-based loose matching
-            program_name_terms = [w for w in user_message.split() if len(w) > 3]
+        
+        # Check for category queries FIRST (before time queries) if it's a pure category query
+        # This ensures category queries work independently
+        query_type = extracted.get("query_type", "general")
+        is_pure_category_query = (query_type == "category" and extracted.get("category") and not time_query)
+        
+        if is_pure_category_query:
+            print(f"\nPure category query detected - searching for category {extracted.get('category')}...")
+            cat_input = str(extracted.get("category", "")).strip()
+            target_cat = _normalize_category_label(cat_input)
+            print(f"DEBUG: Category query - input='{cat_input}', normalized='{target_cat}'")
+            
+            if target_cat:
+                for program in excel_rows:
+                    prog_cat = _normalize_category_label(program.get("Category", ""))
+                    if prog_cat == target_cat:
+                        matching_programs.append(program)
+                print(f"Found {len(matching_programs)} programs in category {target_cat} (normalized from '{cat_input}')")
+        
+        # If time query detected, prioritize time-based matching
+        elif time_query:
+            if time_comparison:
+                print(f"\nTime query detected: '{time_query}' with '{time_comparison}' comparison - searching for items {time_comparison} this time...")
+            else:
+                print(f"\nTime query detected: '{time_query}' - searching for items at this time...")
+            # Normalize time query for matching
+            def normalize_time(time_str):
+                """Normalize time string to various formats for matching"""
+                if not time_str:
+                    return []
+                time_str = time_str.upper().strip()
+                formats = [time_str]  # Original format
+                # Extract hour and minute
+                hour_match = re.search(r'(\d{1,2})', time_str)
+                if hour_match:
+                    hour = int(hour_match.group(1))
+                    # Check if PM/AM
+                    is_pm = 'PM' in time_str
+                    is_am = 'AM' in time_str
+                    # Add various formats
+                    if hour < 12 and (is_pm or (not is_am and not is_pm)):
+                        formats.append(f"{hour}:00 PM")
+                        formats.append(f"{hour} PM")
+                        formats.append(f"{hour}:00PM")
+                        formats.append(f"{hour}PM")
+                    if hour < 12 and is_am:
+                        formats.append(f"{hour}:00 AM")
+                        formats.append(f"{hour} AM")
+                        formats.append(f"{hour}:00AM")
+                        formats.append(f"{hour}AM")
+                    if is_pm and hour < 12:
+                        formats.append(f"{hour + 12}:00")
+                    if is_am and hour == 12:
+                        formats.append("0:00")
+                return formats
+            
+            normalized_times = normalize_time(time_query)
+            print(f"Normalized time formats: {normalized_times}")
+            
+            # Match items by time - find ALL items at this time (or after/before)
+            seen_programs = set()  # Track already matched programs to avoid duplicates
+            print(f"Searching through {len(excel_rows)} Excel rows for time '{time_query}'...")
+            
+            # Extract reference time for comparison queries
+            def extract_time_24h(time_str):
+                """Extract time in 24-hour format (hours as integer) for comparison"""
+                if not time_str:
+                    return None
+                hour_match = re.search(r'(\d{1,2})', time_str.upper())
+                if not hour_match:
+                    return None
+                hour = int(hour_match.group(1))
+                
+                # Extract minutes if present
+                minute_match = re.search(r':(\d{2})', time_str.upper())
+                minutes = int(minute_match.group(1)) if minute_match else 0
+                
+                # Convert to 24-hour format
+                is_pm = 'PM' in time_str.upper()
+                is_am = 'AM' in time_str.upper()
+                
+                if is_pm and hour < 12:
+                    hour_24 = hour + 12
+                elif is_pm and hour == 12:
+                    hour_24 = 12
+                elif not is_am and not is_pm and hour >= 12:
+                    # Assume 24-hour format already
+                    hour_24 = hour
+                elif not is_am and not is_pm and hour < 12:
+                    # Could be either, default to AM
+                    hour_24 = hour
+                elif is_am and hour == 12:
+                    hour_24 = 0
+                else:
+                    hour_24 = hour
+                
+                # Return as total minutes for easier comparison
+                return hour_24 * 60 + minutes
+            
+            # Get reference time for comparison
+            ref_time_minutes = None
+            if time_comparison:
+                ref_time_minutes = extract_time_24h(time_query)
+                if ref_time_minutes is not None:
+                    print(f"Reference time for '{time_comparison}': {time_query} = {ref_time_minutes} minutes (24h format)")
+            
             for program in excel_rows:
-                program_name = program.get("Program Name", "").upper()
-                if any(term.upper() in program_name for term in program_name_terms):
-                    matching_programs.append(program)
+                program_time = str(program.get("Time", "")).strip().upper()
+                if not program_time:
+                    continue
+                
+                # Create unique key for this program
+                prog_key = (
+                    program.get("Item", "").strip().upper(),
+                    program.get("Time", "").strip().upper(),
+                    program.get("Category", "").strip().upper(),
+                    str(program.get("Date", "")).strip()
+                )
+                
+                # Skip if already matched
+                if prog_key in seen_programs:
+                    continue
+                
+                matched = False
+                
+                # For "after" or "before" queries, do time comparison
+                if time_comparison and ref_time_minutes is not None:
+                    prog_time_minutes = extract_time_24h(program_time)
+                    if prog_time_minutes is not None:
+                        if time_comparison == "after" and prog_time_minutes > ref_time_minutes:
+                            matching_programs.append(program)
+                            seen_programs.add(prog_key)
+                            matched = True
+                            print(f"  ✓ Matched ({time_comparison}): {program.get('Item')} at {program_time} ({prog_time_minutes} > {ref_time_minutes})")
+                        elif time_comparison == "before" and prog_time_minutes < ref_time_minutes:
+                            matching_programs.append(program)
+                            seen_programs.add(prog_key)
+                            matched = True
+                            print(f"  ✓ Matched ({time_comparison}): {program.get('Item')} at {program_time} ({prog_time_minutes} < {ref_time_minutes})")
+                
+                # For exact time matches, continue with existing logic
+                if not matched and not time_comparison:
+                    # Check if any normalized time format matches
+                    for norm_time in normalized_times:
+                        norm_time_upper = norm_time.upper()
+                        if norm_time_upper in program_time or program_time in norm_time_upper:
+                            matching_programs.append(program)
+                            seen_programs.add(prog_key)
+                            matched = True
+                            print(f"  ✓ Matched (normalized): {program.get('Item')} at {program_time}")
+                            break
+                
+                # If not matched yet, do fuzzy hour matching ONLY if:
+                # 1. The program time has no minutes (or minutes are 00)
+                # 2. The query doesn't specify minutes
+                # This prevents "1 pm" from matching "1:30 pm"
+                if not matched and not time_comparison:
+                    # Check if program time has non-zero minutes
+                    # Patterns: "13:30", "13:30:00", "1:30 PM", etc.
+                    prog_has_minutes = bool(re.search(r':\d{2}[:\d]*', program_time))
+                    if prog_has_minutes:
+                        # Extract minutes from program time
+                        minute_match = re.search(r':(\d{2})', program_time)
+                        if minute_match:
+                            prog_minutes = int(minute_match.group(1))
+                            # Only match if minutes are 00 (exact hour match)
+                            if prog_minutes != 0:
+                                continue  # Skip this program - it has non-zero minutes
+                    
+                    # Check if query specifies minutes
+                    query_has_minutes = bool(re.search(r':\d{2}', time_query.upper()))
+                    
+                    query_hour_match = re.search(r'(\d{1,2})', time_query.upper())
+                    prog_hour_match = re.search(r'(\d{1,2})', program_time)
+                    if query_hour_match and prog_hour_match:
+                        query_hour = int(query_hour_match.group(1))
+                        prog_hour = int(prog_hour_match.group(1))
+                        # Handle PM conversion
+                        is_query_pm = 'PM' in time_query.upper()
+                        is_prog_pm = 'PM' in program_time
+                        
+                        # Convert to 24-hour format for comparison
+                        if is_query_pm and query_hour < 12:
+                            query_hour_24 = query_hour + 12
+                        elif is_query_pm and query_hour == 12:
+                            query_hour_24 = 12
+                        elif not is_query_pm and query_hour == 12:
+                            query_hour_24 = 0
+                        else:
+                            query_hour_24 = query_hour
+                            
+                        if is_prog_pm and prog_hour < 12:
+                            prog_hour_24 = prog_hour + 12
+                        elif is_prog_pm and prog_hour == 12:
+                            prog_hour_24 = 12
+                        elif not is_prog_pm and prog_hour == 12:
+                            prog_hour_24 = 0
+                        else:
+                            prog_hour_24 = prog_hour
+                        
+                        # Match ONLY if:
+                        # - Hours are the same AND
+                        # - Program has no minutes or minutes are 00 (for exact hour queries)
+                        # - OR query explicitly specifies minutes (then do minute matching too)
+                        if query_hour_24 == prog_hour_24:
+                            # If query has no minutes, only match programs with 00 minutes
+                            if not query_has_minutes:
+                                # Verify program has 00 minutes or no minutes specified
+                                if prog_has_minutes:
+                                    minute_match = re.search(r':(\d{2})', program_time)
+                                    if minute_match and int(minute_match.group(1)) != 0:
+                                        continue  # Skip - has non-zero minutes
+                            
+                            matching_programs.append(program)
+                            seen_programs.add(prog_key)
+                            print(f"  ✓ Matched (hour): {program.get('Item')} at {program_time} (query: {query_hour_24}h, program: {prog_hour_24}h)")
+            
+            print(f"Total matches found: {len(matching_programs)}")
+        
+        # If no time-based matches or no time query, try name-based matching
+        if not matching_programs:
+            if exact_name_matches:
+                matching_programs = exact_name_matches
+            else:
+                # Fallback to token-based loose matching
+                item_name_terms = [w for w in user_message.split() if len(w) > 3]
+                for program in excel_rows:
+                    item_name = program.get("Item", "").upper()
+                    if any(term.upper() in item_name for term in item_name_terms):
+                        matching_programs.append(program)
 
         if matching_programs:
-            if os.getenv("DEBUG_LOGS") == "1":
-                print(f"[DEBUG] Found {len(matching_programs)} matching program(s) in Excel data for '{user_message}':")
-                for prog in matching_programs:
-                    print(f"  - {prog}")
-            # Remove duplicates from matching_programs (unique by program name, stage, category, date)
+            print(f"[DEBUG] Found {len(matching_programs)} matching program(s) in Excel data for '{user_message}':")
+            for i, prog in enumerate(matching_programs):
+                print(f"  [{i+1}] Item: {prog.get('Item')}, Time: {prog.get('Time')}, Category: {prog.get('Category')}, Date: {prog.get('Date')}")
+            # Remove duplicates from matching_programs (unique by item, time, category, date)
             seen = set()
             deduped = []
             for prog in matching_programs:
                 prog_key = (
-                    prog.get("Program Name", "").strip().upper(),
-                    prog.get("Stage", "").strip().upper(),
+                    prog.get("Item", "").strip().upper(),
+                    prog.get("Time", "").strip().upper(),
                     prog.get("Category", "").strip().upper(),
                     str(prog.get("Date", "")).strip()
                 )
@@ -1295,29 +1624,162 @@ def search_program_data(extracted, user_message, combined_data=None):
                     matching_programs = filtered_matches
                     print(f"Filtered to {len(matching_programs)} program(s) for date {filter_date}")
 
+            # Apply category filtering if category is specified (even with time query)
+            if extracted.get("category"):
+                cat_input = str(extracted.get("category", "")).strip()
+                target_cat = _normalize_category_label(cat_input)
+                if target_cat:
+                    category_filtered = []
+                    for prog in matching_programs:
+                        prog_cat = _normalize_category_label(prog.get("Category", ""))
+                        if prog_cat == target_cat:
+                            category_filtered.append(prog)
+                    if category_filtered:
+                        matching_programs = category_filtered
+                        print(f"Filtered to {len(matching_programs)} program(s) for category {target_cat} (normalized from '{cat_input}')")
+                    else:
+                        print(f"No programs found matching category {target_cat} after filtering {len(matching_programs)} time-matched programs")
+
             # Format the answer directly from Excel data (no hallucinations)
+            # Check for category queries FIRST, then time queries
+            query_type = extracted.get("query_type", "general")
+            is_pure_category_query = (query_type == "category" and extracted.get("category") and not time_query)
+            
+            if is_pure_category_query:
+                cat_input = str(extracted.get("category", "")).strip()
+                target_cat = _normalize_category_label(cat_input)
+                print(f"DEBUG: Category query formatting - input='{cat_input}', normalized='{target_cat}', matching_programs={len(matching_programs)}")
+                
+                if len(matching_programs) == 0:
+                    return f"I couldn't find any items in category {cat_input}. Please check if the category number is correct (1, 2, 3, or 4)."
+                else:
+                    # Format all category items
+                    result_lines = [f"*Category {cat_input} items:*\n"]
+                    for prog in matching_programs:
+                        item_name = prog.get("Item", "Unknown")
+                        time_info = format_time_for_answer(prog.get("Time", "Unknown time"))
+                        date_info = format_date_for_answer(prog.get("Date", ""))
+                        
+                        if date_info:
+                            result_lines.append(f"• {item_name} – {time_info} on {date_info}")
+                        else:
+                            result_lines.append(f"• {item_name} – {time_info}")
+                    
+                    return "\n".join(result_lines)
+            
+            # For time queries, list ALL items at that time (or after/before)
+            print(f"DEBUG: Time query check - time_query='{time_query}', time_comparison='{time_comparison}', matching_programs count={len(matching_programs)}")
+            if time_query:
+                if len(matching_programs) == 0:
+                    # Check if category filter was applied
+                    has_category_filter = extracted.get("category") and _normalize_category_label(str(extracted.get("category", "")))
+                    cat_input = str(extracted.get("category", "")).strip() if has_category_filter else None
+                    
+                    if has_category_filter:
+                        if time_comparison:
+                            return f"I couldn't find any category {cat_input} items scheduled {time_comparison} {time_query}."
+                        else:
+                            return f"I couldn't find any category {cat_input} items scheduled at {time_query}."
+                    else:
+                        if time_comparison:
+                            return f"I couldn't find any items scheduled {time_comparison} {time_query}."
+                        else:
+                            return f"I couldn't find any items scheduled at {time_query}."
+                elif len(matching_programs) == 1:
+                    # Single result - give concise answer
+                    prog = matching_programs[0]
+                    item_name = prog.get("Item", "Unknown")
+                    time_info = format_time_for_answer(prog.get("Time", "Unknown time"))
+                    category_info = prog.get("Category", "")
+                    date_info = format_date_for_answer(prog.get("Date", ""))
+                    
+                    # Build Excel answer
+                    if time_comparison:
+                        if date_info:
+                            excel_answer = f"{time_comparison.title()} {time_query}, {item_name} is performing ({category_info}) on {date_info}." if category_info and category_info != "N/A" else f"{time_comparison.title()} {time_query}, {item_name} is performing on {date_info}."
+                        else:
+                            excel_answer = f"{time_comparison.title()} {time_query}, {item_name} is performing ({category_info})." if category_info and category_info != "N/A" else f"{time_comparison.title()} {time_query}, {item_name} is performing."
+                    else:
+                        if date_info:
+                            excel_answer = f"At {time_info}, {item_name} is performing ({category_info}) on {date_info}." if category_info and category_info != "N/A" else f"At {time_info}, {item_name} is performing on {date_info}."
+                        else:
+                            excel_answer = f"At {time_info}, {item_name} is performing ({category_info})." if category_info and category_info != "N/A" else f"At {time_info}, {item_name} is performing."
+                    
+                    # Combine with PDF chunks if available
+                    if pdf_chunks and len(pdf_chunks.strip()) > 50:
+                        print(f"Found Excel data AND PDF chunks for single result time query - will combine in LLM processing")
+                        # Let it fall through to LLM processing
+                    else:
+                        return excel_answer
+                else:
+                    # Multiple items - list ALL of them
+                    # Check if category filter was applied
+                    has_category_filter = extracted.get("category") and _normalize_category_label(str(extracted.get("category", "")))
+                    if has_category_filter:
+                        cat_input = str(extracted.get("category", "")).strip()
+                        if time_comparison:
+                            result_lines = [f"{time_comparison.title()} {time_query}, the following category {cat_input} items are scheduled:"]
+                        else:
+                            result_lines = [f"At {time_query}, the following category {cat_input} items are scheduled:"]
+                    else:
+                        if time_comparison:
+                            result_lines = [f"{time_comparison.title()} {time_query}, the following items are scheduled:"]
+                        else:
+                            result_lines = [f"At {time_query}, the following items are scheduled:"]
+                    print(f"DEBUG: Formatting {len(matching_programs)} items for time query response (category filter: {has_category_filter})")
+                    for prog in matching_programs:
+                        item_name = prog.get("Item", "Unknown")
+                        category_info = prog.get("Category", "")
+                        date_info = format_date_for_answer(prog.get("Date", ""))
+                        
+                        if category_info and category_info != "N/A" and date_info:
+                            result_lines.append(f"• {item_name} ({category_info}) on {date_info}")
+                        elif category_info and category_info != "N/A":
+                            result_lines.append(f"• {item_name} ({category_info})")
+                        elif date_info:
+                            result_lines.append(f"• {item_name} on {date_info}")
+                        else:
+                            result_lines.append(f"• {item_name}")
+                    
+                    final_response = "\n".join(result_lines)
+                    print(f"DEBUG: Time query response with {len(matching_programs)} items:\n{final_response[:200]}...")
+                    
+                    # Combine with PDF chunks if available
+                    if pdf_chunks and len(pdf_chunks.strip()) > 50:
+                        print(f"Found Excel data AND PDF chunks for time query - will combine in LLM processing")
+                        # Store Excel answer but let it fall through to LLM processing
+                    else:
+                        return final_response
+            
+            # For non-time queries, format normally
             results = []
             for prog in matching_programs:
-                prog_name = prog.get("Program Name", "Unknown")
-                stage_info = prog.get("Stage", "Unknown stage")
+                item_name = prog.get("Item", "Unknown")
+                time_info = format_time_for_answer(prog.get("Time", "Unknown time"))
                 category_info = prog.get("Category", "")
                 date_info = format_date_for_answer(prog.get("Date", ""))
                 
                 if len(matching_programs) == 1:
                     # Single result - give concise, natural answer
                     if date_info:
-                        if category_info and category_info != "N/A":
-                            return f"{prog_name} is performing on {stage_info} ({category_info}) on {date_info}."
-                        else:
-                            return f"{prog_name} is performing on {stage_info} on {date_info}."
+                        excel_answer = f"{item_name} is performing at {time_info} ({category_info}) on {date_info}." if category_info and category_info != "N/A" else f"{item_name} is performing at {time_info} on {date_info}."
                     else:
-                        if category_info and category_info != "N/A":
-                            return f"{prog_name} is performing on {stage_info} ({category_info})."
-                        else:
-                            return f"{prog_name} is performing on {stage_info}."
+                        excel_answer = f"{item_name} is performing at {time_info} ({category_info})." if category_info and category_info != "N/A" else f"{item_name} is performing at {time_info}."
+                    
+                    # For schedule queries, Excel data is authoritative - return it directly
+                    # Only use PDF chunks for factual queries (fees, rules, etc.), not schedule data
+                    if is_schedule_question:
+                        print(f"Schedule query with Excel match - using Excel data as authoritative source")
+                        return excel_answer
+                    # For non-schedule queries, check if PDF chunks should be combined
+                    elif pdf_chunks and len(pdf_chunks.strip()) > 50 and not is_factual_query:
+                        print(f"Found Excel data AND PDF chunks for single result - will combine in LLM processing")
+                        # Let it fall through to LLM processing
+                    else:
+                        return excel_answer
                 else:
                     # Multiple results - format as natural list
-                    line_parts = [stage_info]
+                    line_parts = [time_info]
                     if category_info and category_info != "N/A":
                         line_parts.append(f"({category_info})")
                     if date_info:
@@ -1325,36 +1787,30 @@ def search_program_data(extracted, user_message, combined_data=None):
                     results.append(" ".join(line_parts))
             
             if results:
-                prog_name = matching_programs[0].get('Program Name', 'Program')
-                # More natural, conversational language for multiple stages
-                if len(results) == 2:
-                    return f"{prog_name} is performing on {results[0]} and {results[1]}."
+                item_name_display = matching_programs[0].get('Item', 'Item')
+                # More natural, conversational language for multiple times
+                excel_answer = f"{item_name_display} is performing at {results[0]} and {results[1]}." if len(results) == 2 else f"{item_name_display} is performing at the following times:\n" + "\n".join([f"• {r}" for r in results])
+                
+                # Combine Excel answer with PDF chunks if available for comprehensive answer
+                if pdf_chunks and len(pdf_chunks.strip()) > 50:
+                    print(f"Found Excel data AND PDF chunks - combining answers")
+                    # Return combined answer - let LLM process it for natural response
+                    # Don't return early, let it fall through to LLM processing below
                 else:
-                    return f"{prog_name} is performing on the following stages:\n" + "\n".join([f"• {r}" for r in results])
+                    # Excel answer only, return immediately
+                    return excel_answer
         else:
-            # No Excel match at all – avoid hallucination
-            # Provide a clear receptionist-style fallback with guidance
-            return (
-                "I couldn't find that program in the official schedule. "
-                "Please check the exact program name or share a screenshot of the row."
-            )
+            # No Excel match - check if we have PDF chunks before giving up
+            if not pdf_chunks or len(pdf_chunks.strip()) <= 50:
+                # No Excel match and no PDF chunks - avoid hallucination
+                return (
+                    "I couldn't find that program in the official schedule. "
+                    "Please check the exact program name or share a screenshot of the row."
+                )
+            # PDF chunks found - let it fall through to LLM processing below
+            print("No Excel match, but PDF chunks found - using PDF chunks for answer")
     
-    # Always try to get FAISS PDF chunks (but don't use for schedule questions if Excel has answer)
-    print("\n" + "="*60)
-    print("=== RETRIEVING PDF CHUNKS FROM FAISS ===")
-    print("="*60)
-    # Dynamically adjust k based on question complexity (not hardcoded to specific terms)
-    # Questions with multiple keywords or asking about structured data need more context
-    question_words = user_message.lower().split()
-    question_lower = user_message.lower()
-    
-    # Increase chunks for questions likely to need table/chart/structured data or value points
-    is_value_points_query = any(term in question_lower for term in ["value point", "value points", "marks", "mark"])
-    is_complex_query = len(question_words) > 5 or any(c in user_message for c in ["%", "table", "chart", "list"])
-    
-    # For value points queries, retrieve more chunks to ensure we find the scoring tables
-    k_value = 30 if is_value_points_query else (25 if is_complex_query else 20)
-    pdf_chunks = get_pdf_chunks_context(user_message, k=k_value)
+    # PDF chunks already retrieved at the top of function - continue to use them
     
     # Precise extraction for "Fixing of Grade" table (no hardcoding; parse from text)
     try:
@@ -1416,12 +1872,7 @@ def search_program_data(extracted, user_message, combined_data=None):
     # Only use structured section extraction for questions asking about specific sections
     # Skip for simple fact queries (phone numbers, dates, fees, value points that need direct extraction)
     # This prevents wrong section matching for factual questions
-    user_lower = user_message.lower()
-    is_factual_query = any(term in user_lower for term in [
-        "phone", "number", "contact", "email", "address", "when", "what time", 
-        "how much", "fee", "cost", "price", "date", "accessible", "value point", 
-        "value points", "marks", "mark", "point", "points"
-    ])
+    # is_factual_query is already defined earlier in the function
     
     # Skip structured extraction for factual queries - let LLM handle those directly from chunks
     if not is_factual_query:
@@ -1524,8 +1975,11 @@ def search_program_data(extracted, user_message, combined_data=None):
                 print(f"Added schedule context ({len(excel_context)} chars)")
     
     # 3. FAISS PDF chunks (ALWAYS try to include, independent of manual text)
+    # Note: PDF "TIME" column = duration (1hr, 5mts), NOT scheduled time
+    # Excel "Time" column = actual scheduled time (8:30 AM, 1:00 PM)
     if pdf_chunks:
-        final_context_parts.append("[PDF Chunks]\n" + pdf_chunks)
+        pdf_header = "[PDF Chunks - NOTE: PDF 'TIME' column is DURATION (1hr, 5mts), NOT scheduled time]\n" if is_schedule_question else "[PDF Chunks]\n"
+        final_context_parts.append(pdf_header + pdf_chunks)
         print(f"Added PDF chunks context ({len(pdf_chunks)} chars)")
     else:
         print("No PDF chunks retrieved - FAISS may not be available or index not found")
@@ -1583,18 +2037,27 @@ def search_program_data(extracted, user_message, combined_data=None):
                     - Format answers for WhatsApp (short, clear, easy to read)
                     
                     Answer based on the provided context which may include:
-                    - [SCHEDULE - PRIMARY SOURCE]: Excel program schedule with exact stage numbers, dates, categories - USE THIS FOR ALL SCHEDULE/STAGE QUESTIONS
+                    - [SCHEDULE - PRIMARY SOURCE]: Excel program schedule with exact scheduled times (e.g., "8:30 AM", "1:00 PM"), dates, categories - USE THIS FOR ALL SCHEDULE/TIME QUESTIONS
                     - Manual: Rules, fees, awards, regulations
-                    - PDF Chunks: Semantic search results from the festival manual/guide (use ONLY for fees, rules, awards, grades, percentages, tables - NOT for stage/program questions)
+                    - PDF Chunks: Semantic search results from the festival manual/guide (use ONLY for fees, rules, awards, grades, percentages, tables, durations, remarks, notes - NOT for schedule/time questions)
+                    
+                    ⚠️ CRITICAL: TIME COLUMN DISTINCTION ⚠️
+                    - Excel "Time" column = ACTUAL SCHEDULED TIME of program (e.g., "8:30 AM", "1:00 PM") - USE THIS for "when is X?", "what time is Y?", schedule questions
+                    - PDF "TIME" column = DURATION of program (e.g., "1hr", "5mts", "30mts") - USE THIS for "how long is X?", "duration of Y?", "length of Z?" questions
+                    - For questions about "when is X?", "what time is Y?", "schedule for Z" → USE EXCEL TIME ONLY (scheduled time), IGNORE PDF TIME (duration)
+                    - For questions about "duration of X?", "how long is Y?", "length of Z?" → USE PDF "TIME" column (duration in hrs/mts), convert to minutes or standard format like "X min"
                     
                     CRITICAL PRIORITY FOR SCHEDULE QUESTIONS:
-                    - If you see "[SCHEDULE - PRIMARY SOURCE]" → Use ONLY that data for stage/program questions
+                    - If you see "[SCHEDULE - PRIMARY SOURCE]" → Use ONLY that data for stage/program/time questions
+                    - Excel "Time" has ACTUAL SCHEDULED TIMES like "8:30 AM", "1:00 PM" - use these EXACT values for time questions
+                    - PDF "TIME" has DURATIONS like "1hr", "5mts" - DO NOT use these for schedule/time questions, they're just durations
                     - Excel schedule has exact stage numbers like "STAGE 9", "STAGE 11" - use those EXACT values
                     - DO NOT mix PDF chunk category descriptions (like "Category III (Classes VIII to X)") with Excel stage numbers
                     - If a program appears on multiple stages in Excel, list ALL stages
-                    - Excel data is authoritative for schedule questions - ignore conflicting PDF chunk descriptions
+                    - Excel data is authoritative for schedule/time questions - ignore conflicting PDF chunk descriptions
+                    - If PDF chunks mention a "TIME" column, that's DURATION (how long), not scheduled time (when it happens)
                     
-                    {f"THIS IS A SCHEDULE QUESTION - IGNORE PDF CHUNKS, USE ONLY [SCHEDULE - PRIMARY SOURCE] DATA" if is_schedule_question else ""}
+                    {f"THIS IS A SCHEDULE QUESTION - USE EXCEL 'Time' (scheduled time like '8:30 AM'), IGNORE PDF 'TIME' (duration like '1hr'). USE ONLY [SCHEDULE - PRIMARY SOURCE] DATA" if is_schedule_question else ""}
                     
                     CRITICAL RULES FOR TABLES, CHARTS, GRADES, AND VALUE POINTS:
                     1. PDF Chunks may contain TABLES, CHARTS, or FORMATTED DATA - look carefully for tabular information
@@ -1627,16 +2090,18 @@ def search_program_data(extracted, user_message, combined_data=None):
                     2. Extract EXACT numbers, amounts, percentages, phone numbers, contact info, and details from PDF Chunks when present
                     3. NEVER say "not mentioned" or "not in the provided context" if PDF Chunks section exists and contains relevant data
                     4. For value points queries: If you see ANY mention of "Value Points" with a category name (like "Folk Dance") in the PDF Chunks, extract ALL items and marks - the data IS there, DO NOT say "not mentioned"
-                    5. If question asks about grades, percentages, tables, fees, rules, awards, phone numbers, contact info, or dates - PDF Chunks likely contain it
-                    6. For phone/contact questions: Look for phone numbers (10-digit numbers, numbers with slashes like "9778665476/9778665475"), email addresses, office addresses, or contact details near phrases like "kalotsav office", "contact", "phone", "number"
+                    5. If question asks about grades, percentages, tables, fees, rules, awards, phone numbers, contact info, dates, durations, remarks, or notes - PDF Chunks likely contain it
+                    6. For phone/contact questions: Look for phone numbers (10-digit numbers, numbers with slashes like "9778665476/9778665475"), email addresses, office addresses, or contact details near phrases like "kalotsav office", "contact", "phone", "number", "office number". Phone numbers may appear on a separate line after a dash (-) or after mentioning "kalotsav office". Example: "from the kalotsav office\n-\n9778665476/9778665475" means the office numbers are 9778665476 and 9778665475
                     7. For value points/marks questions: Look for sections with headings like "Value Points" followed by the category (e.g., "Folk Dance"), then item names and mark values. The format in the PDF is: item name on one line, then "X marks" on the next line. Extract them and format clearly: "Item Name - X marks". Example: If you see "Akara Sushama" followed by "15 marks", format as "Akara Sushama - 15 marks". DO NOT output raw number sequences without labels.
                     8. IGNORE raw number sequences without context (like "5 5 10 3 5 8...") - these are likely poorly formatted table data. Look for properly formatted sections with item names and their values instead.
                     9. When you find "Value Points" section with a category name matching the question, extract ALL items and marks listed under that category - do not stop after finding one item.
-                    10. Provide precise answers with exact numbers/percentages/phone numbers when found - extract them directly from the context
-                    11. Use WhatsApp-friendly formatting: *bold* for key labels, bullets for lists
-                    12. If multiple relevant entries exist, list them all clearly
-                    13. If you find partial information (e.g., just percentage, just phone number), provide what you found
-                    14. Phone numbers might appear as digits only (e.g., "9778665476") or with separators - extract them as found
+                    10. For duration questions: Look for PDF "TIME" column values like "1hr", "5mts", "30mts", "1 hour", "5 minutes". Convert to standard format: "1hr" → "60 min", "5mts" → "5 min", "30mts" → "30 min". Always format as "X min" or "X minutes" for consistency.
+                    11. For remarks/notes questions: Look for information in parentheses like "(Common for both boys & girls)", "(Common for both boys and girls)", or other notes listed after the item name and duration in PDF chunks. These notes appear on the line immediately after the duration. Extract ANY text in parentheses or on lines following the item name that provides additional information. Format as: "The remarks for [Item Name] are: [remarks text]". If you find ANY remarks/notes in the PDF chunks, provide them - DO NOT say "not mentioned" if remarks exist.
+                    12. Provide precise answers with exact numbers/percentages/phone numbers/durations/remarks when found - extract them directly from the context
+                    13. Use WhatsApp-friendly formatting: *bold* for key labels, bullets for lists
+                    14. If multiple relevant entries exist, list them all clearly
+                    15. If you find partial information (e.g., just percentage, just phone number), provide what you found
+                    16. Phone numbers might appear as digits only (e.g., "9778665476") or with separators - extract them as found
                     
                     Answer format: Write naturally and conversationally. Be direct but friendly. Extract exact values from PDF Chunks. For tables, value points, or structured data, format them clearly with item names and values (e.g., "Item Name - X marks"), never output raw number sequences."""},
                     {"role": "user", "content": f"""Question: {user_message}
@@ -1651,13 +2116,15 @@ CRITICAL INSTRUCTIONS:
    - Formatting is messy or unconventional
    - Information is in tables, lists, or paragraph form
    - Keywords don't match exactly but meaning is similar
-4. For phone/contact questions: Search for phone numbers (long digit sequences like "9778665476/9778665475"), look near words like "office", "kalotsav", "contact", "phone", "number" - extract the digits you find
+4. For phone/contact questions: Search for phone numbers (long digit sequences like "9778665476/9778665475"), look near words like "office", "kalotsav", "contact", "phone", "number", "office number". Phone numbers often appear on a separate line after mentioning "kalotsav office" and may have a dash (-) before them. If you see "kalotsav office" followed by a dash and then 10-digit numbers, those ARE the office numbers - extract them. Example: if you see "from the kalotsav office" followed by "-" followed by "9778665476/9778665475", the office numbers are 9778665476 and 9778665475
 5. For value points/marks questions: Search for "Value Points" header, then find the category name (e.g., "Folk Dance"), then extract ALL items listed. The format is: item name on one line, mark value on next line. Example: "Akara Sushama" followed by "15 marks" means "Akara Sushama - 15 marks". Extract EVERY item under that category. Format as: "The value points for [category] are: * Item 1 - X marks * Item 2 - Y marks..." List ALL items you find - DO NOT stop after one. NEVER output raw number sequences without context.
-6. IGNORE raw number sequences that appear without labels or context (like standalone numbers "5 5 10 3..." on separate lines) - these are poorly extracted table data. Always look for properly formatted sections with item names and their values.
-7. If you find ANY "Value Points" section matching the question category in the context, extract and list ALL items - never say "not mentioned" if this data exists in the chunks.
-8. DO NOT respond with "not mentioned" - if you find ANY relevant information in the context that answers the question, provide it
-9. If the context has the answer but it's scattered across chunks, piece it together intelligently
-10. CRITICAL FOR VALUE POINTS: If you see "Value Points" and "Folk Dance" in the same chunk or context, the answer IS THERE - extract it and format it clearly, never say it's not mentioned
+6. For remarks/notes questions: Search for the item name (e.g., "Mono Act"), then look at the lines IMMEDIATELY AFTER the duration (e.g., "5mts"). Remarks appear in parentheses like "(Common for both boys & girls)" or "(Common for both boys and Girls)" or as additional text on the next line. If you see ANY text in parentheses or additional descriptive text after the item name and duration, that IS the remark - extract it and provide it. DO NOT say "not mentioned" if you find ANY parenthetical text or notes after the item.
+7. IGNORE raw number sequences that appear without labels or context (like standalone numbers "5 5 10 3..." on separate lines) - these are poorly extracted table data. Always look for properly formatted sections with item names and their values.
+8. If you find ANY "Value Points" section matching the question category in the context, extract and list ALL items - never say "not mentioned" if this data exists in the chunks.
+9. DO NOT respond with "not mentioned" - if you find ANY relevant information in the context that answers the question, provide it
+10. If the context has the answer but it's scattered across chunks, piece it together intelligently
+11. CRITICAL FOR VALUE POINTS: If you see "Value Points" and "Folk Dance" in the same chunk or context, the answer IS THERE - extract it and format it clearly, never say it's not mentioned
+12. CRITICAL FOR REMARKS: If you see an item name followed by a duration (like "5mts") followed by text in parentheses or additional descriptive text, that IS the remark - extract it. Example: "Mono Act\n5mts\n(Common for both boys & girls)" means the remark is "Common for both boys & girls"
 
 INSTRUCTIONS:
 - Read the context carefully and extract information that answers the question
@@ -1680,7 +2147,8 @@ Now answer the question: {user_message}"""}
             import traceback
             traceback.print_exc()
     
-    
+    # If we reach here, either no context was found or AI response was too short
+    # Fall back to direct data search from Excel/PDF
     # Convert all program data to a formatted string with better date formatting
     def format_date_for_display(date_str):
         """Format date string for better readability"""
@@ -1699,7 +2167,7 @@ Now answer the question: {user_message}"""}
             return str(date_str)
     
     all_programs_text = "\n".join([
-        f"- {p.get('Program Name', 'Unknown')} at {p.get('Stage', 'Unknown')} (Category: {p.get('Category', 'N/A')}) on {format_date_for_display(p.get('Date', 'Unknown'))}"
+        f"- {p.get('Item', 'Unknown')} at {format_time_for_answer(p.get('Time', 'Unknown'))} (Category: {p.get('Category', 'N/A')}) on {format_date_for_display(p.get('Date', 'Unknown'))}"
         for p in combined_data
     ])
     
@@ -1781,31 +2249,8 @@ IMPORTANT: Understand user intent. If they ask "category one programmes", they m
         print(f"Error in AI response: {e}")
         return "I'm having trouble processing your request. Please try again."
     
-    # Handle greetings and casual conversation
-    if extracted.get("is_greeting", False):
-        current_hour = pd.Timestamp.now().hour
-        if "bye" in user_message.lower() or "goodbye" in user_message.lower():
-            return ("Goodbye! Feel free to ask me about any programs later. "
-                    "I'm here to help!")
-        elif "good morning" in user_message.lower() or ("morning" in user_message.lower() and "hi" in user_message.lower()):
-            return ("Good morning! I'm your Kalolsavam assistant. "
-                   "How can I help you today? You can ask me about any programs, venues, or schedules!")
-        elif "good afternoon" in user_message.lower():
-            return ("Good afternoon! I'm your Kalolsavam assistant. "
-                   "How can I help you today? You can ask me about any programs, venues, or schedules!")
-        elif "good evening" in user_message.lower():
-            return ("Good evening! I'm your Kalolsavam assistant. "
-                   "How can I help you today? You can ask me about any programs, venues, or schedules!")
-        elif "thank" in user_message.lower():
-            return "You're welcome! Let me know if you need anything else!"
-        elif "how are you" in user_message.lower():
-            return ("I'm doing great, thank you for asking! "
-                   "I'm ready to help you with any information about the Kalolsavam programs. "
-                   "What would you like to know?")
-        else:
-            return ("Hello! I'm your Kalolsavam assistant. "
-                   "I can help you with program schedules, venues, and timings. "
-                   "What would you like to know?")
+    # Note: Greetings are handled early in the webhook, so they shouldn't reach here
+    # But keep this fallback in case this function is called directly
     # Use cached Excel data
     df = program_cache['excel_data']
     
@@ -1820,10 +2265,10 @@ IMPORTANT: Understand user intent. If they ask "category one programmes", they m
         source_label = "[Excel]" if program.get("Source") == "excel" else "[PDF]"
         
         if detailed:
-            details = [f"*{program['Program Name']}* ({program.get('Category', 'N/A')}) {source_label}"]
+            details = [f"*{program['Item']}* ({program.get('Category', 'N/A')}) {source_label}"]
             
-            if program.get("Stage"):
-                details.append(f"Stage: {program['Stage']}")
+            if program.get("Time"):
+                details.append(f"Time: {format_time_for_answer(program['Time'])}")
             
             if program.get("Date"):
                 details.append(f"Date: {program['Date']}")
@@ -1831,9 +2276,9 @@ IMPORTANT: Understand user intent. If they ask "category one programmes", they m
             return "\n".join(details)
         else:
             return (
-                f"• *{program['Program Name']}* "
+                f"• *{program['Item']}* "
                 f"({program.get('Category', 'N/A')}) {source_label}\n"
-                f"  Stage: {program.get('Stage', 'N/A')}"
+                f"  Time: {format_time_for_answer(program.get('Time', 'N/A'))}"
             )
 
     # Filter and search through combined data
@@ -1858,35 +2303,41 @@ IMPORTANT: Understand user intent. If they ask "category one programmes", they m
             lambda p: venue_query in str(p.get("Venue", "")).lower()
         )
     
-    if extracted.get("stage"):
-        stage_num = extracted["stage"]
+    if extracted.get("time"):
+        time_val = extracted["time"]
         filtered_programs = filter_programs(
             filtered_programs,
-            lambda p: f"Stage {stage_num}" in str(p.get("Stage", ""))
+            lambda p: time_val.lower() in str(p.get("Time", "")).lower()
         )
 
-    # Category filter (supports forms like "CAT-2", "CAT - 2", "CATEGORY 2", "CATEGORY II")
+    # Category filter (robust: supports "CATEGORY IV", "CAT-4", "4", etc.)
     if extracted.get("category"):
-        cat_num = str(extracted["category"]).strip()
-        def _cat_match(cat_val: str) -> bool:
-            c = str(cat_val or "").upper().replace(" ", "")
-            return (
-                f"CAT-{cat_num}".replace(" ", "") in c or
-                f"CAT- {cat_num}".replace(" ", "") in c or
-                f"CAT{cat_num}" in c or
-                f"CATEGORY{cat_num}" in c or
-                c.endswith(cat_num)
+        cat_input = str(extracted["category"]).strip()
+        target_cat = _normalize_category_label(cat_input)
+        print(f"DEBUG: Category filter - input='{cat_input}', normalized='{target_cat}'")
+        if target_cat:
+            original_count = len(filtered_programs)
+            filtered_programs = filter_programs(
+                filtered_programs,
+                lambda p: _normalize_category_label(p.get("Category", "")) == target_cat
             )
-        filtered_programs = filter_programs(
-            filtered_programs,
-            lambda p: _cat_match(p.get("Category", ""))
-        )
+            print(f"DEBUG: Category filter - filtered from {original_count} to {len(filtered_programs)} programs")
+            # Debug: show some matches
+            if filtered_programs:
+                print(f"DEBUG: Sample category matches:")
+                for p in filtered_programs[:5]:
+                    print(f"  - {p.get('Item')} ({p.get('Category')}) -> normalized: '{_normalize_category_label(p.get('Category', ''))}'")
+            else:
+                print(f"DEBUG: No category matches found. Testing normalization on sample categories:")
+                sample_cats = set(str(p.get("Category", "")).strip() for p in all_programs[:20])
+                for cat in list(sample_cats)[:5]:
+                    print(f"  - '{cat}' -> normalized: '{_normalize_category_label(cat)}'")
 
-    # Gender refinement for category/program queries
+    # Gender refinement for category/item queries
     if gender_intent:
         filtered_programs = filter_programs(
             filtered_programs,
-            lambda p: gender_intent in str(p.get("Program Name", "")).upper()
+            lambda p: gender_intent in str(p.get("Item", "")).upper()
         )
     
     if extracted.get("date") or extracted.get("day"):
@@ -1928,11 +2379,11 @@ IMPORTANT: Understand user intent. If they ask "category one programmes", they m
             filtered_programs = []
             for p in all_programs:
                 prog_date = str(p.get("Date", "")).strip()
-                print(f"Checking program: {p.get('Program Name')} on {prog_date}")
+                print(f"Checking item: {p.get('Item')} on {prog_date}")
                 
                 # Direct string comparison first
                 if prog_date == date_query:
-                    print(f"Found match (direct): {p.get('Program Name')}")
+                    print(f"Found match (direct): {p.get('Item')}")
                     filtered_programs.append(p)
                     continue
                 
@@ -1941,16 +2392,16 @@ IMPORTANT: Understand user intent. If they ask "category one programmes", they m
                     query_date = pd.to_datetime(date_query).strftime("%d-%m-%Y")
                     program_date = pd.to_datetime(prog_date).strftime("%d-%m-%Y")
                     if query_date == program_date:
-                        print(f"Found match (normalized): {p.get('Program Name')}")
+                        print(f"Found match (normalized): {p.get('Item')}")
                         filtered_programs.append(p)
                 except:
                     pass
             
-            print(f"\nFound {len(filtered_programs)} programs for {date_query}")
+            print(f"\nFound {len(filtered_programs)} items for {date_query}")
             if filtered_programs:
-                print("\nFound these programs:")
+                print("\nFound these items:")
                 for p in filtered_programs:
-                    print(f"- {p['Program Name']} ({p['Category']}) at {p['Stage']}")
+                    print(f"- {p['Item']} ({p['Category']}) at {p['Time']}")
     
     if extracted.get("time"):
         time_query = extracted["time"].lower()
@@ -2000,28 +2451,29 @@ IMPORTANT: Understand user intent. If they ask "category one programmes", they m
         program_query = extracted.get("program", "").lower() or user_message.lower()
         matching_programs = filter_programs(
             all_programs,
-            lambda p: program_query in str(p.get("Program Name", "")).lower()
+            lambda p: program_query in str(p.get("Item", "")).lower()
         )
         for program in matching_programs:
             results.append(format_program_details(program, detailed=True))
 
     elif query_type == "category" or (query_type == "general" and extracted.get("category")):
+        print(f"DEBUG: Processing category query - query_type='{query_type}', category='{extracted.get('category')}', filtered_programs={len(filtered_programs)}")
         if filtered_programs:
-            header = f"*Category {extracted.get('category')} programs*"
+            header = f"*Category {extracted.get('category')} items*"
             if gender_intent:
-                header = f"*{gender_intent.title()} Category {extracted.get('category')} programs*"
+                header = f"*{gender_intent.title()} Category {extracted.get('category')} items*"
             results.append(header + ":\n")
-            # Show concise lines: Program – Stage on Date (Category)
+            # Show concise lines: Item – Time on Date (Category)
             def _fmt_row(p):
-                prog = p.get("Program Name", "Unknown")
-                stage = p.get("Stage", "N/A")
+                item = p.get("Item", "Unknown")
+                time = p.get("Time", "N/A")
                 date = p.get("Date", "")
                 cat = p.get("Category", "")
-                return f"• {prog} – {stage} on {date} ({cat})"
-            # De-duplicate by Program+Stage+Date
+                return f"• {item} – {time} on {date} ({cat})"
+            # De-duplicate by Item+Time+Date
             seen = set()
             for p in filtered_programs:
-                key = (p.get("Program Name", ""), p.get("Stage", ""), p.get("Date", ""))
+                key = (p.get("Item", ""), p.get("Time", ""), p.get("Date", ""))
                 if key in seen:
                     continue
                 seen.add(key)
@@ -2106,23 +2558,56 @@ def generate_human_like_reply(user_message, info_text):
     """
     try:
         cleaned_info = _deduplicate_and_flatten_list_text(info_text)
+        
+        # Check if this is a factual query (website, fee, phone, etc.) vs schedule query
+        user_msg_lower = user_message.lower()
+        is_factual_query = any(term in user_msg_lower for term in [
+            "website", "url", "fee", "cost", "price", "phone", "contact", "email", 
+            "address", "register", "registration", "how much", "what is", "when",
+            "accessible", "time", "timing", "anchoring", "anchor",
+            "duration", "how long", "length", "time period", "mins", "minutes",
+            "hrs", "hours", "hr", "mts", "mt", "running time", "remark", "remarks",
+            "note", "notes", "comment", "comments", "additional", "info", "detail",
+            "office", "kalotsav office", "call", "mobile"
+        ])
+        
+        # Different system prompts for factual vs schedule queries
+        if is_factual_query:
+            system_prompt = """You are a clear, concise WhatsApp assistant for the Kalolsavam Cultural Festival.
+            TASK: Rewrite the assistant's response as a brief, natural human reply.
+            CRITICAL RULES:
+            - PRESERVE all factual information (website URLs, dates, times, fees, phone numbers, etc.) EXACTLY as provided
+            - If the assistant message contains a clear answer, use it - DO NOT say "I couldn't find" or "not found"
+            - Make the reply conversational and friendly but keep it brief
+            - No emojis
+            - If the assistant message is already clear and complete, keep it as-is or make minor improvements only
+            - DO NOT reject valid answers or say "not found" if the assistant provided an answer
+            - The assistant's message IS the answer - just rewrite it in a friendly way"""
+            
+            user_prompt = f"User asked: '{user_message}'\n\nAssistant found this answer:\n{cleaned_info}\n\nRewrite this as a brief, friendly WhatsApp reply. PRESERVE all factual details (URLs, dates, times, amounts) exactly as shown. If an answer is provided, use it - do not say it's not found. The answer is already correct, just make it more conversational."
+        else:
+            # Schedule/program query - use stricter matching
+            system_prompt = """You are a clear, concise WhatsApp assistant for the Kalolsavam Cultural Festival.
+            HARD CONSTRAINTS (NO HALLUCINATIONS):
+            - Use ONLY the content provided by the assistant message; never add or infer extra items, dates, stages, or categories.
+            - If the user asks about a specific program name (e.g., MONO ACT), include ONLY lines that refer to that exact program name. Do NOT include similarly worded but different items (e.g., ENGLISH ONE ACT PLAY) when asked about MONO ACT.
+            - If there is a single schedule entry, answer with ONE short, natural sentence.
+            - If multiple entries exist for that same program, consolidate into one short readable sentence, listing each unique (Stage, Category, Date) only once.
+            - If no entries for the exact program are present, clearly say you couldn't find it and suggest checking the exact program name. Do not fabricate.
+            - No emojis; keep it brief and professional.
+            - Preserve exact dates as written; do not substitute with relative words.
+            - IMPORTANT: If the assistant content contains entries that are NOT for the exact program requested, IGNORE those lines entirely."""
+            
+            user_prompt = "Rewrite the above as a brief, human reply without emojis. Include ONLY entries that match the exact program name asked by the user. Do not add or infer any data that is not present above."
+        
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
-            temperature=0.2,
+            temperature=0.1,
             messages=[
-                {"role": "system", "content": """You are a clear, concise WhatsApp assistant for the Kalolsavam Cultural Festival.
-                HARD CONSTRAINTS (NO HALLUCINATIONS):
-                - Use ONLY the content provided by the assistant message; never add or infer extra items, dates, stages, or categories.
-                - If the user asks about a specific program name (e.g., MONO ACT), include ONLY lines that refer to that exact program name. Do NOT include similarly worded but different items (e.g., ENGLISH ONE ACT PLAY) when asked about MONO ACT.
-                - If there is a single schedule entry, answer with ONE short, natural sentence.
-                - If multiple entries exist for that same program, consolidate into one short readable sentence, listing each unique (Stage, Category, Date) only once.
-                - If no entries for the exact program are present, clearly say you couldn't find it and suggest checking the exact program name. Do not fabricate.
-                - No emojis; keep it brief and professional.
-                - Preserve exact dates as written; do not substitute with relative words.
-                - IMPORTANT: If the assistant content contains entries that are NOT for the exact program requested, IGNORE those lines entirely."""},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
                 {"role": "assistant", "content": f"{cleaned_info}"},
-                {"role": "user", "content": "Rewrite the above as a brief, human reply without emojis. Include ONLY entries that match the exact program name asked by the user. Do not add or infer any data that is not present above."}
+                {"role": "user", "content": user_prompt}
             ]
         )
         text = response.choices[0].message.content.strip()
@@ -2141,265 +2626,96 @@ def send_whatsapp_message(to, message):
     """
     Send the WhatsApp message back using Twilio API.
     Handle rate limits and errors appropriately.
+    Retry on transient DNS/network errors.
     """
-    try:
-        twilio_client.messages.create(
-            from_=FROM_NUMBER,
-            to=to,
-            body=message
-        )
-        print(f"Successfully sent reply to {to}")
-    except Exception as e:
-        error_str = str(e).lower()
-        if "limit" in error_str:
-            print("Twilio daily message limit reached. Please try again tomorrow.")
-            # Here you could implement fallback communication or alert administrators
-            return {"status": "error", "type": "rate_limit", "message": "Daily message limit reached"}
-        else:
+    import time
+    
+    max_retries = 3
+    retry_delay = 2  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            twilio_client.messages.create(
+                from_=FROM_NUMBER,
+                to=to,
+                body=message
+            )
+            print(f"Successfully sent reply to {to}")
+            return {"status": "success"}
+        except Exception as e:
+            error_str = str(e).lower()
+            
+            # Check if it's a rate limit error (don't retry)
+            if "limit" in error_str:
+                print("Twilio daily message limit reached. Please try again tomorrow.")
+                return {"status": "error", "type": "rate_limit", "message": "Daily message limit reached"}
+            
+            # Check if it's a transient DNS/network error (retry)
+            is_transient_error = any(term in error_str for term in [
+                "name resolution", "dns", "getaddrinfo", "connection", 
+                "timeout", "network", "unreachable", "refused"
+            ])
+            
+            if is_transient_error and attempt < max_retries - 1:
+                current_delay = retry_delay * (2 ** attempt)  # Exponential backoff
+                print(f"Twilio transient error (attempt {attempt + 1}/{max_retries}): {e}")
+                print(f"Retrying in {current_delay} seconds...")
+                time.sleep(current_delay)
+                continue
+            
+            # Permanent error or max retries reached
             print(f"Twilio send error: {e}")
             return {"status": "error", "type": "general", "message": str(e)}
 
 
-def process_pdf_content(pdf_text):
-    """
-    Process extracted PDF text and convert it to structured data
-    Handles both manual-style format (ITEM CODE, ITEM, TIME) and general format
-    """
-    try:
-        # Split text into lines and remove empty lines
-        lines = [line.strip() for line in pdf_text.split('\n') if line.strip()]
-        
-        programs = []
-        current_program = {}
-        current_category = None
-        i = 0
-        
-        while i < len(lines):
-            line = lines[i]
-            
-            # Track categories for manual
-            if "CATEGORY" in line.upper() and ("CLASS" in line.upper() or "III" in line or "IV" in line):
-                current_category = line.strip()
-                
-            # Check if this is an ITEM CODE (3-digit number at start of line)
-            if re.match(r'^\d{3}\s*$', line):
-                item_code = line.strip()
-                # Look ahead for item name and time
-                if i + 1 < len(lines):
-                    item_name = lines[i + 1].strip()
-                    if i + 2 < len(lines) and not re.match(r'^\d+$', lines[i + 2]):
-                        # Third line might be continuation or time
-                        time_line = lines[i + 2].strip()
-                        if any(word in time_line.lower() for word in ['hr', 'mts', 'min', 'hour']):
-                            time_val = time_line
-                            current_program = {
-                                "Program Name": item_name,
-                                "Time": time_val,
-                                "Category": current_category if current_category else "Manual",
-                                "Item Code": item_code
-                            }
-                            programs.append(current_program.copy())
-                            i += 3
-                            continue
-                
-                # If time is on next line
-                if i + 2 < len(lines):
-                    time_val = lines[i + 2].strip()
-                    if any(word in time_val.lower() for word in ['hr', 'mts', 'min', 'hour']) or time_val.isdigit():
-                        current_program = {
-                            "Program Name": item_name if 'item_name' in locals() else lines[i + 1].strip(),
-                            "Time": time_val,
-                            "Category": current_category if current_category else "Manual",
-                            "Item Code": item_code
-                        }
-                        programs.append(current_program.copy())
-                        i += 3
-                        continue
-            
-            # Look for common program details patterns (original format)
-            if "Program:" in line or "Event:" in line:
-                if current_program:
-                    programs.append(current_program)
-                current_program = {"Program Name": line.split(":", 1)[1].strip()}
-            elif "Time:" in line or "Timing:" in line:
-                if current_program:
-                    current_program["Time"] = line.split(":", 1)[1].strip()
-            elif "Venue:" in line:
-                if current_program:
-                    current_program["Venue"] = line.split(":", 1)[1].strip()
-            elif "Stage:" in line:
-                if current_program:
-                    current_program["Stage"] = line.split(":", 1)[1].strip()
-            elif "Category:" in line:
-                if current_program:
-                    current_program["Category"] = line.split(":", 1)[1].strip()
-            elif "Participants:" in line:
-                if current_program:
-                    current_program["Participants"] = line.split(":", 1)[1].strip()
-            
-            i += 1
-        
-        # Add the last program if exists
-        if current_program:
-            programs.append(current_program)
-            
-        return programs
-    except Exception as e:
-        print(f"Error processing PDF content: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
-
-def extract_text_from_pdf(pdf_buffer):
-    """
-    Extract text from a PDF using PyMuPDF
-    """
-    text = []
-    try:
-        # Open PDF from buffer
-        pdf_document = fitz.open(stream=pdf_buffer.getvalue(), filetype="pdf")
-        
-        # Extract text from each page
-        for page_num in range(pdf_document.page_count):
-            page = pdf_document[page_num]
-            text.append(page.get_text())
-        
-        pdf_document.close()
-        return "\n".join(text)
-    except Exception as e:
-        print(f"Error extracting text from PDF: {e}")
-        return None
 
 @app.get("/")
 def root():
     return {"message": " Kalolsavam WhatsApp Assistant is running!"}
 
 
-
 @app.get("/ask")
+@app.get("/ask/")  # Also handle trailing slash
 async def ask_unified_get(question: str = Query(None, description="Your question about schedule/manual/PDF")):
-    """Unified GET endpoint: answers using Excel schedule, manual, and FAISS PDF chunks."""
-    if not question:
-        return {"status": "error", "error": "No question provided. Use ?question=..."}
-    try:
-        extracted = extract_query_info(question)
-        combined_data = update_cache_if_needed()
-        answer = search_program_data(extracted, question, combined_data)
-        return {"status": "success", "question": question, "answer": answer}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
-@app.post("/ask")
-async def ask_unified_post(request: Request):
     """
-    Unified POST endpoint: accepts questions in multiple formats:
-    - JSON body: {"question": "..."} or {"message": "..."}
-    - Form data: question=...
+    Unified GET endpoint: answers using Excel schedule, manual, and FAISS PDF chunks.
+    
+    Usage: GET /ask?question=your question here
+    Example: GET /ask?question=what is the appeal fee?
     """
-    question = None
-    content_type = request.headers.get("content-type", "")
-    
-    # Try JSON first (most common)
-    if "application/json" in content_type or not content_type:
-        try:
-            payload = await request.json()
-            question = payload.get("question") or payload.get("message")
-        except Exception:
-            # If JSON fails, might be form data
-            pass
-    
-    # Try form data if no question found yet
     if not question:
-        if "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
-            try:
-                form_data = await request.form()
-                question = form_data.get("question") or form_data.get("message")
-            except Exception:
-                pass
-        # Also try form data even if content-type is missing or unclear
-        elif not content_type:
-            try:
-                form_data = await request.form()
-                question = form_data.get("question") or form_data.get("message")
-            except Exception:
-                pass
-    
-    # Clean up question (remove whitespace)
-    if question:
-        question = question.strip()
-        if not question:
-            question = None
-    
-    if not question:
-        # Provide helpful error with format examples
         return {
             "status": "error",
             "error": "No question provided",
-            "examples": {
-                "json": {
-                    "method": "POST",
-                    "url": "/ask",
-                    "headers": {"Content-Type": "application/json"},
-                    "body": {"question": "what is the appeal fee?"}
-                },
-                "form_data": {
-                    "method": "POST",
-                    "url": "/ask",
-                    "headers": {"Content-Type": "multipart/form-data"},
-                    "body": "question=what is the appeal fee?"
-                },
-                "urlencoded": {
-                    "method": "POST",
-                    "url": "/ask",
-                    "headers": {"Content-Type": "application/x-www-form-urlencoded"},
-                    "body": "question=what is the appeal fee?"
-                }
-            },
-            "content_type_received": content_type
+            "usage": "GET /ask?question=your question here",
+            "example": "/ask?question=what is the appeal fee?",
+            "methods_available": {
+                "GET": "Use query parameter ?question=...",
+                "POST": "Send question in JSON body: {\"question\": \"...\"} or form data: question=..."
+            }
         }
-    
     try:
         extracted = extract_query_info(question)
-        clear_schedule_cache()
         combined_data = update_cache_if_needed()
         answer = search_program_data(extracted, question, combined_data)
         return {"status": "success", "question": question, "answer": answer}
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
-@app.post("/upload-pdf-for-faiss")
-async def upload_pdf_for_faiss(pdf_file: UploadFile = File(...)):
-    """
-    Upload a PDF file and create/update FAISS vector store from it.
-    This processes the PDF into chunks and creates searchable embeddings.
-    """
-    try:
-        if not _FAISS_AVAILABLE:
-            return {
-                "status": "error",
-                "error": "FAISS dependencies not available. Install: pip install langchain-openai langchain-community faiss-cpu"
-            }
-        
-        # Read PDF file
-        pdf_content = await pdf_file.read()
-        pdf_buffer = io.BytesIO(pdf_content)
-        
-        # Extract text from PDF
-        extracted_text = extract_text_from_pdf(pdf_buffer)
-        
-        if not extracted_text:
-            return {"status": "error", "error": "Failed to extract text from PDF"}
-        
-        # Create FAISS vector store
-        chunks_count = create_faiss_from_text(extracted_text)
-        
-        return {
-            "status": "success",
-            "message": f"PDF processed and FAISS index created with {chunks_count} chunks",
-            "chunks": chunks_count
-        }
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
+# Import and register the ask router
+# Note: Import is here (after app initialization) to avoid circular dependency issues
+try:
+    from api.ask import router as ask_router
+    app.include_router(ask_router, tags=["ask"])
+    print("✓ Ask API router registered successfully")
+    print(f"  - Router has {len(ask_router.routes)} route(s)")
+    for route in ask_router.routes:
+        print(f"  - Route: {route.methods} {route.path}")
+except Exception as e:
+    print(f"✗ Error registering ask router: {e}")
+    import traceback
+    traceback.print_exc()
+
 
 if __name__ == "__main__":
     import uvicorn

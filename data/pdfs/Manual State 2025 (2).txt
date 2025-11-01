@@ -1,9 +1,3 @@
-
-Labour India Public School 
-CBSE State Kalotsav 2K25 on November 12,13,14,15 
-2 
- 
-
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 3 
@@ -23,36 +17,48 @@ REMARKS
 101 
 Pencil Drawing 
 1hr 
+ 
 102 
 Painting Crayon 
 1hr 
+ 
 103 
 Recitation-Malayalam 
 5mts 
+ 
 104 
 Recitation-English 
 5mts 
+ 
 105 
 Recitation-Hindi 
 5mts 
+ 
 106 
 Light Music-Malayalam 
 5mts 
+ 
 107 
 Folkdance 
 5mts 
+ 
 108 
 Elocution-English 
 5mts 
+ 
 109 
 Elocution-Malayalam 
 5mts 
+ 
 110 
 Digital Painting 
 30mts 
+ 
 111 
 Painting Water Colour 
 1hr 
+ 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -67,51 +73,66 @@ REMARKS
 201 
 Pencil Drawing 
 2hrs 
+ 
 202 
 Painting (water colour) 
 2hrs 
+ 
 203 
 Cartoon 
 2hrs 
+ 
 204 
 Elocution-English 
 5mts 
+ 
 205 
 Elocution-Hindi 
 5mts 
+ 
 206 
 Elocution-Malayalam 
 5mts 
+ 
 207 
 Recitation -Malayalam 
 5mts 
+ 
 208 
 Recitation-Hindi 
 5mts 
+ 
 209 
 Recitation- (English) 
 5mts 
+ 
 210 
 Recitation-(Sanskrit) 
 5mts 
+ 
 211 
 Recitation-(Arabic) 
 5mts 
+ 
 212 
 Essay writing (Engilsh) 
 1hr 
+ 
 213 
 Essay writing 
 (Malayalam ) 
 1hr 
+ 
 214 
 Light Music(Malayalam - 
 Boys) 
 5mts 
+ 
 215 
 Light Music (Malayalam - 
 Girls) 
 5mts 
+ 
 216 
 Classical Music 
 (Karnatic) 
@@ -121,9 +142,11 @@ boys & girls)
 217 
 Folk Dance (Girls) 
 5mts 
+ 
 218 
 Folk Dance (Boys) 
 5mts 
+ 
 219 
 Group Dance (Girls) 
 10mts 
@@ -131,12 +154,15 @@ Group Dance (Girls)
 220 
 Bharatanatyam(Boys) 
 10mts 
+ 
 221 
 Bharatanatyam(Girls) 
 10mts 
+ 
 222 
 Mohiniyattam (Girls) 
 10mts 
+ 
 223 
 Mono Act 
 5mts 
@@ -147,6 +173,7 @@ Digital Painting
 30mts 
 (Common for both 
 boys &girls) 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -161,82 +188,106 @@ REMARKS
 301 
 Pencil Drawing 
 2hrs 
+ 
 302 
 Painting (Oil Colour) 
 2hrs 
+ 
 303 
 Painting (Water Colour) 
 2hrs 
+ 
 304 
 Cartoon 
 2hrs 
+ 
 305 
 Essay writing (English) 
 1hr 
+ 
 306 
 Essay writing 
 (Malayalam) 
 1hr 
+ 
 307 
 Essay writing(Hindi) 
 1hr 
+ 
 308 
 Story writing 
 (Malayalam) 
 1hr 
+ 
 309 
 Story writing (Hindi) 
 1hr 
+ 
 310 
 Story writing (English) 
 1hr 
+ 
 311 
 Versification (English) 
 1hr 
+ 
 312 
 Versification (Hindi) 
 1hr 
+ 
 313 
 Versification 
 (Malayalam) 
 1hr 
+ 
 314 
 Extempore (Malayalam) 
 5mts 
+ 
 315 
 Extempore (English) 
 5mts 
+ 
 316 
 Extempore (Hindi) 
 5mts 
+ 
 317 
 Recitation (Malayalam) 
 5mts 
+ 
 318 
 Recitation (Hindi) 
 5mts 
+ 
 319 
 Recitation (English) 
 5mts 
+ 
 320 
 Recitation (Sanskrit) 
 5mts 
+ 
 321 
 Recitation (Arabic) 
 5mts 
+ 
 322 
 Light Music 
 Malayalam(Boys) 
 5mts 
+ 
 323 
 Light Music 
 Malayalam(Girls) 
 5mts 
+ 
 324 
 Classical Music 
 (Karnatic-Boys) 
 10mts 
 Sruti allowed 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -254,9 +305,11 @@ Sruti Allowed
 326 
 Mappilapattu(Boys) 
 5mts 
+ 
 327 
 Mappilapattu (Girls) 
 5mts 
+ 
 328 
 Mono Act 
 5mts 
@@ -265,24 +318,31 @@ boys and Girls)
 329 
 Bharatanatyam (Girls) 
 10mts 
+ 
 330 
 Bharatanatyam (Boys) 
 10mts 
+ 
 331 
 Kuchippudi (Girls) 
 10mts 
+ 
 332 
 Kuchippudi (Boys) 
 10mts 
+ 
 333 
 Mohiniyattam(Girls) 
 10mts 
+ 
 334 
 Folk Dance (Girls) 
 5mts 
+ 
 335 
 Folk Dance (Boys) 
 5mts 
+ 
 336 
 Ottanthullal 
 10mts 
@@ -300,18 +360,23 @@ Group Dance (Girls)
 339 
 Mridungam (Eastern) 
 10mts 
+ 
 340 
 Tabala (Eastern) 
 10mts 
+ 
 341 
 Guitar (Western) 
 10mts 
+ 
 342 
 Flute 
 10mts 
+ 
 343 
 Violin (Eastern) 
 10mts 
+ 
 344 
 Anchoring (Single) 
 7mts 
@@ -341,6 +406,7 @@ Digital Painting
 (Common for both 
 boys and Girls) 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 7 
@@ -356,103 +422,135 @@ REMARKS
 401 
 Pencil Drawing 
 2hrs 
+ 
 402 
 Painting (Water Colour) 
 2hrs 
+ 
 403 
 Painting (Oil Colour) 
 2hrs 
+ 
 404 
 Cartoon 
 2hrs 
+ 
 405 
 Essay Writing 
 (Malayalam) 
 1hr 
+ 
 406 
 Essay Writing (English) 
 1hr 
+ 
 407 
 Essay Writing (Hindi) 
 1hr 
+ 
 408 
 Story writing (English) 
 1hr 
+ 
 409 
 Story writing 
 (Malayalam) 
 1hr 
+ 
 410 
 Story writing (Hindi) 
 1hr 
+ 
 411 
 Versification 
 (Malayalam) 
 1hr 
+ 
 412 
 Versification (Hindi) 
 1hr 
+ 
 413 
 Versification (English) 
 1hr 
+ 
 414 
 Extempore (Malayalam) 
 5mts 
+ 
 415 
 Extempore (English) 
 5mts 
+ 
 416 
 Extempore (Hindi) 
 5mts 
+ 
 417 
 Recitation (Malayalam) 
 5mts 
+ 
 418 
 Recitation (English) 
 5mts 
+ 
 419 
 Recitation (Hindi) 
 5mts 
+ 
 420 
 Recitation (Sanskrit) 
 5mts 
+ 
 421 
 Recitation (Arabic) 
 5mts 
+ 
 422 
 Classical Music 
 (Karnatic-Boys) 
 10mts 
+ 
 423 
 Classical Music 
 (Karnatic-Girls) 
 10mts 
+ 
 424 
 Light Music Malayalam 
 (Boys) 
 5mts 
+ 
 425 
 Light Music Malayalam 
 (Girls) 
 5mts. 
+ 
 426 
 Mappilapattu (Boys) 
 5mts 
+ 
 427 
 Mappilapattu (Girls) 
 5mts 
+ 
 428 
 Bharatanatyam (girls) 
 10mts 
+ 
 429 
 Bharatanatyam(Boys) 
 10mts 
+ 
 430 
 Mohiniyattam (Girls) 
 10mts 
+ 
 431 
 Folk dance (Boys) 
 5mts 
+ 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -461,6 +559,7 @@ CBSE State Kalotsav 2K25 on November 12,13,14,15
 432 
 Folk dance (Girls) 
 5mts 
+ 
 433 
 Mono Act 
 5mts 
@@ -474,24 +573,31 @@ boys and Girls)
 435 
 Flute (Eastern) 
 10mts 
+ 
 436 
 Mridungam (Eastern) 
 10mts 
+ 
 437 
 Tabala (Eastern) 
 10mts 
+ 
 438 
 Violin(Eastern) 
 10mts 
+ 
 439 
 Guitar (Western) 
 10mts 
+ 
 440 
 Kuchippudi (Boys) 
 10mts 
+ 
 441 
 Kuchippudi(Girls) 
 10mts 
+ 
 442 
 Anchoring 
 7mts 
@@ -576,6 +682,7 @@ Duffmutt (Boys)
 10mts 
 (10 participants) 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 9 
@@ -614,6 +721,7 @@ irrespective of category or sex.
 (4) English One Act Play 
 (5) Western Music Concert 
 (6) Band 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -667,6 +775,7 @@ in the safe custody of the General Convener of the State CBSE Kalotsav
 and must be handed over to the convener of the core committee after 
 the Kalotsav. 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 11 
@@ -716,6 +825,7 @@ ordination of the activities. For the Judges Committee alone there shall be
 only two Chairpersons, one from the Confederation of Sahodaya and the 
 other institution. 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 12 
@@ -763,6 +873,7 @@ of law will be allowed to participate in their respective event and grades
 / prizes / awards shall be given to the participant / team. The points for 
 grade and prize (if any) will not be added to the school and to the 
 Sahodaya in deciding the toppers of the Kalotsav. 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -815,6 +926,7 @@ Participants should return the chest number to the concerned Stage
 Manager after the performance and should collect their ID cards 
 before leaving the venue. 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 14 
@@ -862,6 +974,7 @@ Grade C
 1 point 
 No grade / points for 49% and below 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 15 
@@ -878,11 +991,15 @@ CALCULATION OF POINTS FOR INDIVIDUAL ITEMS
  
  
  
+ 
+ 
 5 
 5 
 10 
+ 
 3 
 5 
+ 
 8 
 1 
 5 
@@ -899,11 +1016,16 @@ CALCULATION OF POINTS FOR INDIVIDUAL ITEMS
 4 
  
  
+ 
+ 
 5 
 1 
+ 
 6 
+ 
 3 
 1 
+ 
 4 
 1 
 1 
@@ -911,6 +1033,9 @@ CALCULATION OF POINTS FOR INDIVIDUAL ITEMS
  
  
 CALCULATON OF POINTS FOR GROUP ITEMS 
+ 
+ 
+ 
  
  
  
@@ -933,6 +1058,7 @@ CALCULATON OF POINTS FOR GROUP ITEMS
 10 
 12 
  
+ 
 10 
 6 
 16 
@@ -943,6 +1069,7 @@ CALCULATON OF POINTS FOR GROUP ITEMS
 6 
 8 
  
+ 
 10 
 2 
 12 
@@ -952,6 +1079,7 @@ CALCULATON OF POINTS FOR GROUP ITEMS
 2 
 2 
 4 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -997,6 +1125,7 @@ ii.
 To be eligible to sign on the appeal, a delegate of the sahodaya head 
 has to submit the duly attested letter from the sahodaya head in the 
 Kalotsav office. 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -1044,6 +1173,7 @@ topic shall be decided by the judges.
 shall be decided by the judges and given to the participants five minutes 
 before the competition. 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 18 
@@ -1052,14 +1182,14 @@ CBSE State Kalotsav 2K25 on November 12,13,14,15
 participants can sing any raga. 
 9. In Mappilapattu, film songs shall not be allowed. 
  
-10. 
+10.  
  
-11. 
+11.  
 12. 
 For Thiruvathira, simple traditional dress should be used. 
 Originality of the dance must be maintained. The singers must be 
 students. Nilavilkku and Nirapara will be provided at the venue. 
-13. 
+13.  
  
  
 IV. 
@@ -1073,21 +1203,31 @@ theme or the topic shall be given by the judges at the venue. The time
 allotted shall be 2 hrs. The participants shall bring materials like pen, 
 pencil, colours etc. Size of paper provided will be A3 size 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 19 
  
 b. Value Points: 
+ 
+ 
 Drawing 
+ 
 Proportion 
 25 marks 
+ 
 Neatness 
 25 marks 
+ 
 Imagination and beauty of the strokes 
 25 marks 
+ 
 Clarity of the theme 
 25 marks 
+ 
 Painting 
+ 
+ 
 Ability in doing portraits and scenery 
 Light and shade 
 Imagination 
@@ -1098,7 +1238,10 @@ Clarity of the theme
 20 marks 
 20 marks 
 20 marks 
+ 
 Cartoon 
+ 
+ 
 Clarity of the theme 
 Sense of humour 
 Uniqueness 
@@ -1110,8 +1253,12 @@ Composition
 20 marks 
 20 marks 
 2. LITERARY ITEMS 
+ 
+ 
 Essay writing, Story writing, Poetry writing, Extempore, Elocution, 
+ 
 Recitation 
+ 
  
 The paper for writing shall be provided at the venue. Other materials shall 
 be brought by the competitors. The topics for elocution shall be announced 
@@ -1130,6 +1277,7 @@ Grammatical Correctness
 10marks 
 Correct spelling 
 10 marks 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -1188,6 +1336,7 @@ c. Group song
 Only Malayalam song shall be allowed. Number of participants shall be 
 7. No Musical Instruments shall be allowed except Sruthi Box. 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 21 
@@ -1245,6 +1394,7 @@ Gamagam
 Thalam 
 25 marks 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 22 
@@ -1296,6 +1446,7 @@ Oppana
 There shall be 10 participants (three singers and seven performers). 
 No background music shall be allowed. Only girls can participate. 
 Time: 10 minutes. 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -1350,6 +1501,7 @@ Thalam & Combination of clapping
 20 marks 
 Originality of presentation 
 20 marks 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -1409,6 +1561,7 @@ Steps
 Presentation 
 15 marks 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 25 
@@ -1454,6 +1607,7 @@ Originality
 25 marks 
 Clarity 
 25 marks 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -1502,6 +1656,7 @@ colour, fabric colour, crayons or colour pencil can be used)
 e) Cutting and pasting pictures are not allowed. The design should be 
 purely done by the participants themselves. 
 f) Size of the design will be based on the paper distributed at the time of 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -1558,6 +1713,7 @@ d) Confirm the folder and check that your file is saved in the specific folder
 before logging off. Organizers will not be responsible for any lost file. 
 e) The images needed for the slide will be provided in the folder named 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 28 
@@ -1605,6 +1761,7 @@ i) The curtain will rise at the beginning of the play and will only fall after
 the play has concluded. 
 j) The Best Character Award will be given regardless of gender. No points 
 will be awarded to the school or Sahodaya for this award. 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -1657,6 +1814,7 @@ Subject knowledge:
 (In depth knowledge of the event, clarity) 
 20 marks 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 30 
@@ -1703,6 +1861,7 @@ Interpretation of style
 (Approach to using unusual chord progressions in the chorus, alteration 
 between major and minor chords, the conflict in the lyrics.) 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 31 
@@ -1734,6 +1893,7 @@ Turn out
 20 marks 
 National Anthem Playing 
 20 marks 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -1769,6 +1929,7 @@ level office bearers.
  
 8. Food for the Committee members and the judges shall be arranged by the 
 host school. 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -1808,6 +1969,7 @@ performed again at the end of that particular cluster.
 9. Before starting the judgement, the stage manager will announce the 
 profile of the judges in each stage. So, the profiles of the judges are to be 
 given early enough to make necessary arrangements. 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -1861,6 +2023,7 @@ academic year, if so decided.
 • The finality of the host institution’s and Core Committee’s decisions in all 
 disciplinary and administrative matters, including appeals or reviews. 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 35 
@@ -1895,6 +2058,7 @@ Witnesses:
 2.  
 (Name & Signature) 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 36 
@@ -1919,6 +2083,7 @@ I shall be responsible if anything occurs contrary to this declaration.
 Name & Signature 
 Place 
 Date: 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -1955,6 +2120,7 @@ PERFORMA FOR APPEAL
 : 
 15. Date and time of filling appeal 
 : 
+
 
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
@@ -1993,6 +2159,7 @@ Remarks
  President CKSC/Convener Core Committee  
 Date: 
 
+
 Labour India Public School 
 CBSE State Kalotsav 2K25 on November 12,13,14,15 
 39 
@@ -2028,5 +2195,3 @@ Decision on appeal
  
  
 Name and address of the participants 
-
- 

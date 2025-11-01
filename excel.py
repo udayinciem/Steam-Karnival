@@ -40,8 +40,8 @@ def load_excel_data():
         
         # Map column names to standard names
         column_mapping = {
-            'Stage': 'Stage',
-            'Program': 'Program Name',
+            'Time': 'Time',
+            'Item': 'Item',
             'Category': 'Category',
             'Date': 'Date'
         }
@@ -49,10 +49,10 @@ def load_excel_data():
         # Try to find matching columns
         for col in df.columns:
             col_lower = col.lower()
-            if 'stage' in col_lower or 'venue' in col_lower:
-                column_mapping[col] = 'Stage'
-            elif 'program' in col_lower or 'event' in col_lower:
-                column_mapping[col] = 'Program Name'
+            if 'time' in col_lower:
+                column_mapping[col] = 'Time'
+            elif 'item' in col_lower or 'program' in col_lower or 'event' in col_lower:
+                column_mapping[col] = 'Item'
             elif 'category' in col_lower or 'type' in col_lower:
                 column_mapping[col] = 'Category'
             elif 'date' in col_lower or 'day' in col_lower:
@@ -73,8 +73,8 @@ def load_excel_data():
         programs = []
         for _, row in df.iterrows():
             program = {
-                'Stage': row.get('Stage', 'N/A'),
-                'Program Name': row.get('Program Name', 'N/A'),
+                'Time': row.get('Time', 'N/A'),
+                'Item': row.get('Item', 'N/A'),
                 'Category': row.get('Category', 'N/A'),
                 'Date': row.get('Date', 'N/A')
             }
@@ -84,26 +84,26 @@ def load_excel_data():
         # Create formatted string for LLM
         excel_content = "PROGRAM SCHEDULE:\n\n"
         
-        # Group by stage and date
-        programs_by_stage = {}
+        # Group by time and date
+        programs_by_time = {}
         for prog in programs:
-            stage = prog['Stage']
-            if stage not in programs_by_stage:
-                programs_by_stage[stage] = {}
+            time = prog['Time']
+            if time not in programs_by_time:
+                programs_by_time[time] = {}
             
             date = prog['Date']
-            if date not in programs_by_stage[stage]:
-                programs_by_stage[stage][date] = []
+            if date not in programs_by_time[time]:
+                programs_by_time[time][date] = []
             
-            programs_by_stage[stage][date].append(prog)
+            programs_by_time[time][date].append(prog)
             
         # Format the content
-        for stage in sorted(programs_by_stage.keys()):
-            excel_content += f"\n🎭 {stage}:\n"
-            for date in sorted(programs_by_stage[stage].keys()):
+        for time in sorted(programs_by_time.keys()):
+            excel_content += f"\n⏰ {time}:\n"
+            for date in sorted(programs_by_time[time].keys()):
                 excel_content += f"  📅 {date}:\n"
-                for prog in sorted(programs_by_stage[stage][date], key=lambda x: x['Program Name']):
-                    excel_content += f"    • {prog['Program Name']} ({prog['Category']})\n"
+                for prog in sorted(programs_by_time[time][date], key=lambda x: x['Item']):
+                    excel_content += f"    • {prog['Item']} ({prog['Category']})\n"
                     
         return excel_content, programs
     except Exception as e:
@@ -175,7 +175,7 @@ async def process_question(final_question: str):
         excel_content, programs = load_excel_data()
         
         # Calculate statistics
-        stages = sorted(set(p['Stage'] for p in programs if p['Stage'] != 'N/A'))
+        times = sorted(set(p['Time'] for p in programs if p['Time'] != 'N/A'))
         dates = sorted(set(p['Date'] for p in programs if p['Date'] != 'N/A'))
         categories = sorted(set(p['Category'] for p in programs if p['Category'] != 'N/A'))
         
@@ -183,10 +183,10 @@ async def process_question(final_question: str):
         prompt = f"""You are a knowledgeable assistant for the Kalolsavam Cultural Festival. Here is the complete program data:
 
 FESTIVAL STATISTICS:
-Total Stages: {len(stages)}
+Total Times: {len(times)}
 Total Programs: {len(programs)}
 Festival Dates: {', '.join(dates)}
-Available Stages: {', '.join(stages)}
+Available Times: {', '.join(times)}
 Program Categories: {', '.join(categories)}
 
 DETAILED PROGRAM SCHEDULE:
@@ -195,19 +195,19 @@ DETAILED PROGRAM SCHEDULE:
 Current Question: "{final_question}"
 
 RESPONSE GUIDELINES:
-1. For questions about numbers (stages, programs, etc.):
+1. For questions about numbers (times, items, etc.):
    - ALWAYS start with "There are X [items] in total" or "The total number of [items] is X"
    - Then list ALL items in a clear format
    - End with any relevant details about the items
    Example: 
-   "There are 3 stages in total at the festival:
-   🎭 Stage 1
-   🎭 Stage 2
-   🎭 Stage 3"
+   "There are 3 times in total at the festival:
+   ⏰ 1:00 PM
+   ⏰ 2:00 PM
+   ⏰ 3:00 PM"
 
 2. For specific program queries:
-   - Give a direct answer about the stage, date, and category
-   Example: "BHARATHA BOYS is performing on Stage 1 on 12-11-2025 (Category 3)"
+   - Give a direct answer about the time, date, and category
+   Example: "BHARATHA BOYS is performing at 1:00 PM on 12-11-2025 (Category 3)"
 
 3. For date/schedule questions:
    - IMPORTANT: Count ALL programs for that date in the schedule above
@@ -240,8 +240,8 @@ RESPONSE GUIDELINES:
                    - Then list all items if appropriate
                    - Finally, provide any additional details
                 
-                Example for "how many stages are there?":
-                "There are 3 stages in total: Stage 1, Stage 2, and Stage 3."
+                Example for "how many times are there?":
+                "There are 3 times in total: 1:00 PM, 2:00 PM, and 3:00 PM."
                 
                 Example for "who all are performing on friday?":
                 "There are 41 programs scheduled for Friday, 2025-11-14. Here they are:
