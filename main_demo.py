@@ -43,7 +43,23 @@ app = FastAPI()
 ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 FROM_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER")
-twilio_client = TwilioClient(ACCOUNT_SID, AUTH_TOKEN)
+
+# Validate Twilio credentials
+if not ACCOUNT_SID:
+    print("ERROR: TWILIO_ACCOUNT_SID not found in environment variables!")
+if not AUTH_TOKEN:
+    print("ERROR: TWILIO_AUTH_TOKEN not found in environment variables!")
+if not FROM_NUMBER:
+    print("ERROR: TWILIO_WHATSAPP_NUMBER not found in environment variables!")
+
+if ACCOUNT_SID and AUTH_TOKEN:
+    print(f"✓ Twilio credentials loaded: SID={ACCOUNT_SID[:10]}... (length: {len(ACCOUNT_SID)})")
+    print(f"✓ Auth Token loaded: {AUTH_TOKEN[:10]}... (length: {len(AUTH_TOKEN)})")
+    print(f"✓ WhatsApp Number: {FROM_NUMBER}")
+    twilio_client = TwilioClient(ACCOUNT_SID, AUTH_TOKEN)
+else:
+    print("WARNING: Twilio not configured. WhatsApp messaging will not work!")
+    twilio_client = None
 
 # OpenAI setup
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -878,7 +894,7 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...), MediaUr
             if not _PDF_EXTRACTOR_AVAILABLE:
                 send_whatsapp_message(user_number, 
                     "Sorry, PDF processing is not available. Please contact the administrator.")
-                return {"status": "error", "message": "PDF extractor not available"}
+                return Response(content="", status_code=200)
             
             # Download PDF from Twilio's media URL
             response = requests.get(MediaUrl0)
@@ -908,12 +924,12 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...), MediaUr
                 chunks_count = result.get('chunks', 0)
                 send_whatsapp_message(user_number, 
                     f"I've received and processed your PDF! Extracted {result.get('text_length', 0):,} characters and created {chunks_count} embeddings. You can now ask me questions about it!")
-                return {"status": "ok", "message": "PDF processed and embeddings created"}
+                return Response(content="", status_code=200)
             else:
                 error_msg = result.get('message', 'Unknown error')
                 send_whatsapp_message(user_number, 
                     f"Sorry, I had trouble processing that PDF: {error_msg}")
-                return {"status": "error", "message": error_msg}
+                return Response(content="", status_code=200)
                 
         except Exception as e:
             print(f"Error processing PDF: {e}")
@@ -921,7 +937,7 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...), MediaUr
             traceback.print_exc()
             send_whatsapp_message(user_number, 
                 "Sorry, I had trouble processing that PDF. Could you try sending it again?")
-            return {"status": "error", "message": str(e)}
+            return Response(content="", status_code=200)
 
     # --- Normal chat logic ---
     # Step 1: Quick greeting check (before followup analysis for faster response)
@@ -950,7 +966,7 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...), MediaUr
             question=user_message,
             response=greeting_reply
         )
-        return {"status": "ok", "message": "Greeting handled"}
+        return Response(content="", status_code=200)
     
     # Step 2: Get chat history (last 5 turns) for intelligent follow-up detection
     chat_history_entries = fetch_all_chats(user_number)
@@ -1053,6 +1069,7 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...), MediaUr
     
     print(f"DEBUG: Final reply to send: {final_reply[:200]}...")
     send_result = send_whatsapp_message(user_number, final_reply)
+    print(f"DEBUG: send_result = {send_result}")
     # Store the chat with full details
     store_chat(
         user_mobile=user_number,
@@ -1060,7 +1077,7 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...), MediaUr
         question=user_message,
         response=final_reply
     )
-    return {"status": "ok"}
+    return Response(content="", status_code=200)
 
 
 def extract_query_info(message: str):
@@ -2630,18 +2647,28 @@ def send_whatsapp_message(to, message):
     """
     import time
     
+    if twilio_client is None:
+        print("ERROR: Cannot send message - Twilio client not initialized!")
+        print("Please check your .env file has correct TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN")
+        return {"status": "error", "type": "config", "message": "Twilio not configured"}
+    
+    print(f"DEBUG: Attempting to send message to {to}")
+    print(f"DEBUG: FROM_NUMBER = {FROM_NUMBER}")
+    print(f"DEBUG: Message preview: {message[:100]}...")
+    
     max_retries = 3
     retry_delay = 2  # seconds
     
     for attempt in range(max_retries):
         try:
-            twilio_client.messages.create(
+            msg = twilio_client.messages.create(
                 from_=FROM_NUMBER,
                 to=to,
                 body=message
             )
             print(f"Successfully sent reply to {to}")
-            return {"status": "success"}
+            print(f"DEBUG: Twilio Message SID: {msg.sid}, Status: {msg.status}")
+            return {"status": "success", "sid": msg.sid, "twilio_status": msg.status}
         except Exception as e:
             error_str = str(e).lower()
             
