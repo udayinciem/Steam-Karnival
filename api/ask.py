@@ -40,10 +40,13 @@ async def ask_unified_post(request: Request):
     if "application/json" in content_type or not content_type:
         try:
             payload = await request.json()
+            print(f"DEBUG: Received JSON payload: {payload}")
             user_message = payload.get("question") or payload.get("message")
             user_id = payload.get("user_id") or payload.get("user_number") or payload.get("user_mobile")
-        except Exception:
+            print(f"DEBUG: Extracted user_message: {user_message}, user_id: {user_id}")
+        except Exception as e:
             # If JSON fails, might be form data
+            print(f"DEBUG: JSON parsing failed: {e}")
             pass
     
     # Try form data if no question found yet
@@ -71,10 +74,24 @@ async def ask_unified_post(request: Request):
             user_message = None
     
     if not user_message:
+        # Try to get raw body for debugging
+        try:
+            body_bytes = await request.body()
+            body_str = body_bytes.decode('utf-8') if body_bytes else ""
+            print(f"DEBUG: Raw body received: {body_str[:200]}")
+        except Exception as e:
+            print(f"DEBUG: Could not read raw body: {e}")
+            body_str = ""
+        
         # Provide helpful error with format examples
         return {
             "status": "error",
             "error": "No question provided",
+            "debug_info": {
+                "content_type_received": content_type,
+                "raw_body_preview": body_str[:200] if body_str else "empty",
+                "body_length": len(body_str) if body_str else 0
+            },
             "examples": {
                 "json": {
                     "method": "POST",
@@ -95,8 +112,8 @@ async def ask_unified_post(request: Request):
                     "body": "question=what is the appeal fee?&user_id=optional"
                 }
             },
-            "content_type_received": content_type,
-            "note": "Include 'user_id' to enable followup detection based on chat history"
+            "note": "Include 'user_id' to enable followup detection based on chat history",
+            "troubleshooting": "Make sure Content-Type header is set to 'application/json' and body is valid JSON"
         }
     
     # Step 1: Quick greeting check (before followup analysis for faster response)

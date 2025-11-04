@@ -53,9 +53,9 @@ if not FROM_NUMBER:
     print("ERROR: TWILIO_WHATSAPP_NUMBER not found in environment variables!")
 
 if ACCOUNT_SID and AUTH_TOKEN:
-    print(f"✓ Twilio credentials loaded: SID={ACCOUNT_SID[:10]}... (length: {len(ACCOUNT_SID)})")
-    print(f"✓ Auth Token loaded: {AUTH_TOKEN[:10]}... (length: {len(AUTH_TOKEN)})")
-    print(f"✓ WhatsApp Number: {FROM_NUMBER}")
+    print(f"[OK] Twilio credentials loaded: SID={ACCOUNT_SID[:10]}... (length: {len(ACCOUNT_SID)})")
+    print(f"[OK] Auth Token loaded: {AUTH_TOKEN[:10]}... (length: {len(AUTH_TOKEN)})")
+    print(f"[OK] WhatsApp Number: {FROM_NUMBER}")
     twilio_client = TwilioClient(ACCOUNT_SID, AUTH_TOKEN)
 else:
     print("WARNING: Twilio not configured. WhatsApp messaging will not work!")
@@ -69,11 +69,17 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FOLDER = os.path.join(BASE_DIR, "data")
 PDF_STORAGE = os.path.join(DATA_FOLDER, "pdfs")
 VECTORSTORE_PATH = os.path.join(BASE_DIR, "my_pdf_vectors")
+EXCEL_VECTORS_PATH = os.path.join(BASE_DIR, "my_excel_vectors")
 
 
 # MongoDB setup (lazy connection - only connects when needed)
 _db_connection = None
 _chats_collection = None
+
+# Cache FAISS vectorstores and embeddings for faster access
+_pdf_vectorstore_cache = None
+_excel_vectorstore_cache = None
+_embeddings_cache = None
 
 def get_mongodb_collection():
     """Lazy MongoDB connection - only connects when chat history is actually needed."""
@@ -260,11 +266,23 @@ def _faiss_index_exists():
     except Exception:
         return False
 
+def _excel_index_exists():
+    """Check if Excel FAISS index exists"""
+    try:
+        if not _FAISS_AVAILABLE:
+            return False
+        index_path = os.path.join(EXCEL_VECTORS_PATH, "index.faiss")
+        return os.path.exists(index_path)
+    except Exception:
+        return False
+
 def get_pdf_chunks_context(question: str, k: int = 20):
     """Retrieve top-k chunks from FAISS vector store as additional context.
     Uses multiple query variations to improve table/chart retrieval.
     Returns empty string if FAISS is not available or index not found.
     """
+    global _pdf_vectorstore_cache, _embeddings_cache
+    
     try:
         if not _FAISS_AVAILABLE:
             print(" FAISS not available - langchain packages may not be installed")
@@ -273,13 +291,21 @@ def get_pdf_chunks_context(question: str, k: int = 20):
             print("FAISS index not found - no PDF chunks available")
             return ""
         
-        print(f"\nLoading FAISS index and retrieving chunks for: '{question}'...")
-        embeddings = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"))
-        vectorstore = FAISS.load_local(
-            VECTORSTORE_PATH,
-            embeddings,
-            allow_dangerous_deserialization=True
-        )
+        # Use cached vectorstore if available (faster)
+        if _pdf_vectorstore_cache is None:
+            print(f"\nLoading PDF FAISS index (first time)...")
+            if _embeddings_cache is None:
+                _embeddings_cache = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"))
+            _pdf_vectorstore_cache = FAISS.load_local(
+                VECTORSTORE_PATH,
+                _embeddings_cache,
+                allow_dangerous_deserialization=True
+            )
+            print("PDF FAISS index cached in memory")
+        else:
+            print(f"\nUsing cached PDF FAISS index for: '{question}'...")
+        
+        vectorstore = _pdf_vectorstore_cache
         
         # Create multiple query variations to improve retrieval for tables/charts
         query_variations = [question]
@@ -292,6 +318,25 @@ def get_pdf_chunks_context(question: str, k: int = 20):
         for word in question.split():
             if len(word) > 3:  # Only meaningful words
                 key_terms.append(word.lower())
+        
+        # Add specific query variations for grade/points queries
+        if "grade" in question_lower and ("point" in question_lower or "fixing" in question_lower):
+            query_variations.append("fixing of grade points")
+            query_variations.append("grade points percentage")
+            query_variations.append("grade A 70% points")
+            query_variations.append("grade table points")
+        
+        # Add specific query variations for merit certificate queries
+        if "merit" in question_lower or "certificate" in question_lower:
+            query_variations.append("merit certificate minimum marks")
+            query_variations.append("merit certificate 50%")
+            query_variations.append("awards and trophies merit certificate")
+            query_variations.append("minimum marks merit certificate")
+        
+        # Add specific query variations for awards/trophies queries
+        if "award" in question_lower or "trophy" in question_lower:
+            query_variations.append("awards and trophies")
+            query_variations.append("merit certificate")
         
         # Create variations using bigrams and combinations
         # This is dynamic - no hardcoded section names
@@ -376,9 +421,129 @@ def get_pdf_chunks_context(question: str, k: int = 20):
             # Check if context contains table-like patterns
             if any(keyword in context.lower() for keyword in ["grade", "%", "percentage", "points", "table"]):
                 print(f"Context appears to contain table/chart data")
+        
         return context
     except Exception as e:
-        print(f"Error retrieving FAISS context: {e}")
+        print(f"Error retrieving PDF chunks: {e}")
+        import traceback
+        traceback.print_exc()
+        return ""
+
+def get_excel_chunks_context(question: str, k: int = 15):
+    """Retrieve top-k chunks from Excel FAISS vector store for semantic search.
+    Returns empty string if FAISS is not available or index not found.
+    """
+    global _excel_vectorstore_cache, _embeddings_cache
+    
+    try:
+        if not _FAISS_AVAILABLE:
+            print("FAISS not available - Excel embeddings cannot be used")
+            return ""
+        if not _excel_index_exists():
+            print("Excel FAISS index not found - falling back to traditional search")
+            return ""
+        
+        # Use cached vectorstore if available (faster)
+        if _excel_vectorstore_cache is None:
+            print(f"\nLoading Excel FAISS index (first time)...")
+            if _embeddings_cache is None:
+                _embeddings_cache = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"))
+            _excel_vectorstore_cache = FAISS.load_local(
+                EXCEL_VECTORS_PATH,
+                _embeddings_cache,
+                allow_dangerous_deserialization=True
+            )
+            print("Excel FAISS index cached in memory")
+        else:
+            print(f"\nUsing cached Excel FAISS index for: '{question}'...")
+        
+        vectorstore = _excel_vectorstore_cache
+        
+        # Create query variations for better retrieval
+        query_variations = [question]
+        question_lower = question.lower()
+        
+        # Expand day names to dates for better matching
+        # If question mentions a day name, add the corresponding date from DAY_MAPPING
+        day_expanded = False
+        for day_name, date in DAY_MAPPING.items():
+            if day_name.lower() in question_lower:
+                # Add query with date format
+                query_variations.append(question.replace(day_name, date).replace(day_name.lower(), date))
+                query_variations.append(f"programs on {date}")
+                query_variations.append(f"category programs on {date}")
+                day_expanded = True
+                break
+        
+        # Extract key terms
+        key_terms = []
+        for word in question.split():
+            if len(word) > 3:  # Only meaningful words
+                key_terms.append(word.lower())
+        
+        # Add bigram combinations
+        if len(key_terms) > 1:
+            for i in range(len(key_terms) - 1):
+                bigram = f"{key_terms[i]} {key_terms[i+1]}"
+                query_variations.append(bigram)
+        
+        # For category queries, add variations
+        if "categor" in question_lower or "cat" in question_lower:
+            query_variations.append("categories performing")
+            query_variations.append("category programs")
+            # Add date-specific category queries if day/date is mentioned
+            for day_name, date in DAY_MAPPING.items():
+                if day_name.lower() in question_lower:
+                    query_variations.append(f"categories on {date}")
+                    query_variations.append(f"category programs on {date}")
+                    query_variations.append(f"what categories {date}")
+                    break
+        
+        # Get unique chunks from query variations
+        all_docs = []
+        seen_chunks = set()
+        
+        # Increase fetch_k for better retrieval, especially for category queries
+        fetch_k_multiplier = 3 if ("categor" in question_lower or "cat" in question_lower) else 2
+        
+        for query_var in query_variations[:5]:  # Use top 5 variations
+            try:
+                retriever = vectorstore.as_retriever(search_kwargs={"k": k, "fetch_k": k * fetch_k_multiplier})
+                docs = retriever.invoke(query_var)
+                print(f"  Query '{query_var}': Retrieved {len(docs)} Excel docs")
+                for doc in docs:
+                    content = getattr(doc, "page_content", str(doc))
+                    if content and content not in seen_chunks:
+                        all_docs.append(doc)
+                        seen_chunks.add(content)
+            except Exception as e:
+                print(f"  Warning: Error with query variation '{query_var}': {e}")
+        
+        if not all_docs:
+            print("No Excel documents retrieved from FAISS")
+            return ""
+        
+        # Sort by relevance (keep first k unique chunks)
+        chunks = []
+        for i, doc in enumerate(all_docs[:k]):
+            content = getattr(doc, "page_content", str(doc))
+            if content:
+                chunks.append(content)
+        
+        context = "\n\n---\n\n".join(chunks) if chunks else ""
+        print(f"Retrieved {len(chunks)} unique Excel chunks ({len(context)} chars total)")
+        
+        # DEBUG: Print first few chunks to verify what's being retrieved
+        if chunks:
+            print(f"\n=== DEBUG: First 3 Excel chunks retrieved ===")
+            for i, chunk in enumerate(chunks[:3], 1):
+                print(f"\nExcel Chunk {i}:")
+                print(chunk[:300] + "..." if len(chunk) > 300 else chunk)
+            print("=" * 60)
+        
+        return context
+    except Exception as e:
+        print(f"Error retrieving Excel chunks: {e}")
         import traceback
         traceback.print_exc()
         return ""
@@ -988,7 +1153,7 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...), MediaUr
             temperature=0,
             messages=[
                 {"role": "system", "content": "You are the Receptionist for Kalsolavm. Decide if the user's latest message is a follow-up to the prior conversation. Return strict JSON only."},
-                {"role": "user", "content": f"Conversation so far (last 5 turns):\n{chat_history}\n\nTask: Is the latest message a follow-up to the previous topic? \n\nIf YES, rewrite it into a COMPLETE standalone query that includes ALL context from previous messages:\n- If previous query mentioned a time (e.g., 'after 2 pm'), include it in the standalone query\n- If previous query mentioned a date or day (e.g., 'Saturday', '12-11-2025'), include it in the standalone query\n- If previous query mentioned a category (e.g., 'category 4'), include it in the standalone query\n- Combine ALL filters from the conversation into one complete query\n\nExample: If user asked 'what items after 2 pm on Saturday?' and then asks 'only category 4', the standalone query should be 'what are the category 4 items after 2 pm on Saturday?'\n\nReturn JSON: {{\"is_followup\": true|false, \"standalone_query\": \"...\"}}"}
+                {"role": "user", "content": f"Conversation so far (last 5 turns):\n{chat_history}\n\nTask: Is the latest message a follow-up to the previous topic? \n\nIf YES, rewrite it into a COMPLETE standalone query that includes ALL context from previous messages:\n- CRITICAL: If the follow-up uses pronouns like 'it', 'them', 'that', 'this', 'they', replace them with the EXACT program/item name from the previous query\n- CRITICAL: If previous query mentioned a program name (e.g., 'elocution', 'folk dance', 'mono act'), and follow-up says 'it' or 'for it', include that EXACT program name in the standalone query\n- If previous query mentioned a time (e.g., 'after 2 pm'), include it in the standalone query WITH the comparison word ('after', 'before', etc.)\n- If previous query mentioned a date or day (e.g., 'Saturday', '12-11-2025'), include it in the standalone query\n- If previous query mentioned a category (e.g., 'category 4'), include it in the standalone query\n- CRITICAL: If the follow-up mentions 'after', 'before', 'past', 'later than', 'earlier than', preserve these words in the expanded query\n- Combine ALL filters from the conversation into one complete query\n\nExample: If user asked 'what are the topics for the elocution?' and then asks 'i need the topics for it', the standalone query should be 'what are the topics for elocution?' (preserve 'elocution')\n\nExample: If user asked 'what items after 2 pm on Saturday?' and then asks 'only category 4', the standalone query should be 'what are the category 4 items after 2 pm on Saturday?'\n\nExample: If user asked 'folk dance for girls' and then asks 'Is there any program happening after 8.30 am?', the standalone query should be 'Is there any program happening after 8.30 am?' (preserve the 'after' keyword)\n\nReturn JSON: {{\"is_followup\": true|false, \"standalone_query\": \"...\"}}"}
             ]
         )
         raw = followup_resp.choices[0].message.content.strip()
@@ -1008,6 +1173,7 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...), MediaUr
     # Step 4: Extract query info from the FINAL query (expanded if it was a followup)
     extracted = extract_query_info(final_query)
     print(f"DEBUG: Query extraction - Original: '{user_message}', Final: '{final_query}', Is Followup: {is_followup}")
+    print(f"DEBUG: Extracted time_comparison: '{extracted.get('time_comparison', '')}'")
     try:
         program_cache['combined_data'] = None
         program_cache['excel_data'] = None
@@ -1249,7 +1415,7 @@ def search_program_data(extracted, user_message, combined_data=None):
     is_remarks_query_check = any(term in question_lower for term in ["remark", "remarks", "note", "notes", "comment", "comments"])
     k_value = 30 if (is_value_points_query or is_remarks_query_check) else (25 if is_complex_query or is_time_query else 20)
     pdf_chunks = get_pdf_chunks_context(user_message, k=k_value)
-    print(f"Retrieved {len(pdf_chunks)} characters from FAISS embeddings")
+    print(f"Retrieved {len(pdf_chunks)} characters from PDF FAISS embeddings")
     
     # Build query terms for manual/excel search
     query_terms = build_query_terms(user_message)
@@ -1307,6 +1473,22 @@ def search_program_data(extracted, user_message, combined_data=None):
     # Extract time from query if present (e.g., "1 pm", "1:00 PM", "13:00")
     # Use AI-extracted values if available, otherwise fall back to regex
     time_query = extracted.get("time", "").strip().lower() if extracted else ""
+    
+    # Check if this is a time query
+    is_time_query_check = bool(time_query) or any(term in user_msg_lower for term in ["time", "when", "at what time", "timing", "schedule"])
+    
+    # ALSO retrieve Excel chunks from FAISS embeddings (if available)
+    # This should be done after determining is_schedule_question
+    print("\n" + "="*60)
+    print("=== RETRIEVING EXCEL CHUNKS FROM FAISS ===")
+    print("="*60)
+    # For schedule questions, use more Excel chunks
+    # For time queries (like "items at 8:30 AM"), retrieve even more chunks to ensure we get all items
+    # For category queries (like "what categories are performing"), also retrieve more chunks
+    is_category_query = "categor" in user_message.lower() or "cat" in user_message.lower()
+    excel_k = 30 if (is_schedule_question and time_query) else (25 if (is_schedule_question or is_category_query) else (20 if is_time_query_check else 15))
+    excel_chunks = get_excel_chunks_context(user_message, k=excel_k)
+    print(f"Retrieved {len(excel_chunks)} characters from Excel FAISS embeddings")
     time_comparison = extracted.get("time_comparison", "").strip().lower() if extracted else None
     time_comparison = time_comparison if time_comparison else None  # Convert empty string to None
     
@@ -1324,322 +1506,344 @@ def search_program_data(extracted, user_message, combined_data=None):
         elif any(word in user_msg_lower_check for word in ["before", "earlier than", "until"]):
             time_comparison = "before"
     
-    # For schedule questions, search Excel first before PDF chunks
+    # For schedule questions, use Excel FAISS semantic search FIRST (if available)
     # Skip Excel search for factual queries (fees, marks, phones, etc.) - they need PDF data
+    matching_programs = []  # Will be populated only if linear search is needed (when Excel FAISS not available)
+    
     if (is_schedule_question or time_query) and combined_data and not is_factual_query:
-        print("\nThis is a schedule question - prioritizing Excel data...")
-        print(f"DEBUG: combined_data has {len(combined_data)} items")
-        # Restrict to Excel rows first (fallback to all only if Excel missing)
-        excel_rows = [p for p in combined_data if p.get("Source") == "excel"]
-        if not excel_rows:
-            print("WARNING: No Excel rows found in combined_data, falling back to all data")
-            excel_rows = combined_data
+        # If Excel FAISS embeddings are available, use them instead of linear search
+        if excel_chunks:
+            print("\nUsing Excel FAISS semantic search - skipping linear search, will use LLM for formatting")
+            # Don't do linear search - use Excel FAISS chunks directly with LLM
+            # matching_programs stays empty, so LLM will process Excel chunks
         else:
-            print(f"DEBUG: Found {len(excel_rows)} Excel rows")
-
-        # Strong exact/containment name match pass
-        msg_upper = user_message.upper()
-        exact_name_matches = []
-        for program in excel_rows:
-            item_name_upper = program.get("Item", "").strip().upper()
-            if item_name_upper and (item_name_upper in msg_upper or msg_upper in item_name_upper):
-                exact_name_matches.append(program)
-
-        matching_programs = []
+            # FAISS not available - skip Excel data (no linear search fallback)
+            print("\nExcel FAISS embeddings not available - skipping Excel data (FAISS required for Excel search)")
+            matching_programs = []
         
         # Check for category queries FIRST (before time queries) if it's a pure category query
         # This ensures category queries work independently
         query_type = extracted.get("query_type", "general")
         is_pure_category_query = (query_type == "category" and extracted.get("category") and not time_query)
         
-        if is_pure_category_query:
-            print(f"\nPure category query detected - searching for category {extracted.get('category')}...")
-            cat_input = str(extracted.get("category", "")).strip()
-            target_cat = _normalize_category_label(cat_input)
-            print(f"DEBUG: Category query - input='{cat_input}', normalized='{target_cat}'")
+        # All Excel queries now use FAISS semantic search only (no linear search)
+        # If excel_chunks is available, LLM will process it; if not, Excel data is skipped
+    
+    # PDF chunks already retrieved at the top of function - continue to use them
+    
+    # Precise extraction for "Fixing of Grade" table (no hardcoding; parse from text)
+    try:
+        # Check for grade-related queries - trigger on "fixing of grade", "grade", "points", "percentage"
+        grade_query = (
+            ("grade" in question_lower and ("point" in question_lower or "percentage" in question_lower or "%" in question_lower or "70" in question_lower or "fixing" in question_lower)) or
+            ("fixing of grade" in question_lower or "fixing of grading" in question_lower) or
+            ("point" in question_lower and "grade" in question_lower)
+        )
+        if grade_query:
+            combined_source = "\n".join([manual_text or "", pdf_chunks or ""])[:20000]
+            # Prefer the section starting near "Fixing of Grade"
+            start_idx = combined_source.lower().find("fixing of grade")
+            if start_idx == -1:
+                start_idx = combined_source.lower().find("fixing of grading")
+            # Increase window size to capture all grades (A, B, C, etc.)
+            window = combined_source[max(0, start_idx-500): start_idx+3000] if start_idx != -1 else combined_source
+            # Normalize whitespace for easier regex
+            normalized = re.sub(r"[\t\u00A0]+", " ", window)
             
-            if target_cat:
-                for program in excel_rows:
-                    prog_cat = _normalize_category_label(program.get("Category", ""))
-                    if prog_cat == target_cat:
-                        matching_programs.append(program)
-                print(f"Found {len(matching_programs)} programs in category {target_cat} (normalized from '{cat_input}')")
-        
-        # If time query detected, prioritize time-based matching
-        elif time_query:
-            if time_comparison:
-                print(f"\nTime query detected: '{time_query}' with '{time_comparison}' comparison - searching for items {time_comparison} this time...")
-            else:
-                print(f"\nTime query detected: '{time_query}' - searching for items at this time...")
-            # Normalize time query for matching
-            def normalize_time(time_str):
-                """Normalize time string to various formats for matching"""
-                if not time_str:
-                    return []
-                time_str = time_str.upper().strip()
-                formats = [time_str]  # Original format
-                # Extract hour and minute
-                hour_match = re.search(r'(\d{1,2})', time_str)
-                if hour_match:
-                    hour = int(hour_match.group(1))
-                    # Check if PM/AM
-                    is_pm = 'PM' in time_str
-                    is_am = 'AM' in time_str
-                    # Add various formats
-                    if hour < 12 and (is_pm or (not is_am and not is_pm)):
-                        formats.append(f"{hour}:00 PM")
-                        formats.append(f"{hour} PM")
-                        formats.append(f"{hour}:00PM")
-                        formats.append(f"{hour}PM")
-                    if hour < 12 and is_am:
-                        formats.append(f"{hour}:00 AM")
-                        formats.append(f"{hour} AM")
-                        formats.append(f"{hour}:00AM")
-                        formats.append(f"{hour}AM")
-                    if is_pm and hour < 12:
-                        formats.append(f"{hour + 12}:00")
-                    if is_am and hour == 12:
-                        formats.append("0:00")
-                return formats
+            # First, try to extract all grades (Grade A, B, C, etc.) - this is the primary method
+            # Improved regex to handle:
+            # - "Grade A: 70% and above = 5 points"
+            # - "Grade B: 60% to 69% = 3 points"
+            # - "Grade B 60-69% 3 points"
+            # - "Grade C 50% to 59% 1 point"
             
-            normalized_times = normalize_time(time_query)
-            print(f"Normalized time formats: {normalized_times}")
+            # Try to extract with percentage ranges first (e.g., "60% to 69%")
+            grade_pattern_with_range = re.compile(
+                r"Grade\s+([A-Z])[^\n]*?(\d+)%\s*(?:to|and|-)\s*(\d+)%[^\n]*?(\d+)\s*point",
+                re.IGNORECASE | re.MULTILINE
+            )
+            matches_with_range = grade_pattern_with_range.findall(normalized)
             
-            # Match items by time - find ALL items at this time (or after/before)
-            seen_programs = set()  # Track already matched programs to avoid duplicates
-            print(f"Searching through {len(excel_rows)} Excel rows for time '{time_query}'...")
+            # Also try to extract with "and above" (e.g., "70% and above")
+            grade_pattern_above = re.compile(
+                r"Grade\s+([A-Z])[^\n]*?(\d+)%\s*(?:and\s+above|and\s+over)[^\n]*?(\d+)\s*point",
+                re.IGNORECASE | re.MULTILINE
+            )
+            matches_above = grade_pattern_above.findall(normalized)
             
-            # Extract reference time for comparison queries
-            def extract_time_24h(time_str):
-                """Extract time in 24-hour format (hours as integer) for comparison"""
-                if not time_str:
-                    return None
-                hour_match = re.search(r'(\d{1,2})', time_str.upper())
-                if not hour_match:
-                    return None
-                hour = int(hour_match.group(1))
-                
-                # Extract minutes if present
-                minute_match = re.search(r':(\d{2})', time_str.upper())
-                minutes = int(minute_match.group(1)) if minute_match else 0
-                
-                # Convert to 24-hour format
-                is_pm = 'PM' in time_str.upper()
-                is_am = 'AM' in time_str.upper()
-                
-                if is_pm and hour < 12:
-                    hour_24 = hour + 12
-                elif is_pm and hour == 12:
-                    hour_24 = 12
-                elif not is_am and not is_pm and hour >= 12:
-                    # Assume 24-hour format already
-                    hour_24 = hour
-                elif not is_am and not is_pm and hour < 12:
-                    # Could be either, default to AM
-                    hour_24 = hour
-                elif is_am and hour == 12:
-                    hour_24 = 0
-                else:
-                    hour_24 = hour
-                
-                # Return as total minutes for easier comparison
-                return hour_24 * 60 + minutes
+            # Combine matches
+            all_matches = {}
+            for grade, min_pct, max_pct, points in matches_with_range:
+                grade_letter = grade.upper()
+                if grade_letter not in all_matches:
+                    all_matches[grade_letter] = (min_pct, max_pct, points)
             
-            # Get reference time for comparison
-            ref_time_minutes = None
-            if time_comparison:
-                ref_time_minutes = extract_time_24h(time_query)
-                if ref_time_minutes is not None:
-                    print(f"Reference time for '{time_comparison}': {time_query} = {ref_time_minutes} minutes (24h format)")
+            for grade, min_pct, points in matches_above:
+                grade_letter = grade.upper()
+                if grade_letter not in all_matches:
+                    all_matches[grade_letter] = (min_pct, "above", points)
             
-            for program in excel_rows:
-                program_time = str(program.get("Time", "")).strip().upper()
-                if not program_time:
-                    continue
-                
-                # Create unique key for this program
-                prog_key = (
-                    program.get("Item", "").strip().upper(),
-                    program.get("Time", "").strip().upper(),
-                    program.get("Category", "").strip().upper(),
-                    str(program.get("Date", "")).strip()
+            # Fallback: simpler pattern if above patterns don't match
+            if not all_matches:
+                grade_pattern_simple = re.compile(
+                    r"Grade\s+([A-Z])[^\n]*?(\d+)%[^\n]*?(\d+)\s*point",
+                    re.IGNORECASE | re.MULTILINE
                 )
-                
-                # Skip if already matched
-                if prog_key in seen_programs:
-                    continue
-                
-                matched = False
-                
-                # For "after" or "before" queries, do time comparison
-                if time_comparison and ref_time_minutes is not None:
-                    prog_time_minutes = extract_time_24h(program_time)
-                    if prog_time_minutes is not None:
-                        if time_comparison == "after" and prog_time_minutes > ref_time_minutes:
-                            matching_programs.append(program)
-                            seen_programs.add(prog_key)
-                            matched = True
-                            print(f"  ✓ Matched ({time_comparison}): {program.get('Item')} at {program_time} ({prog_time_minutes} > {ref_time_minutes})")
-                        elif time_comparison == "before" and prog_time_minutes < ref_time_minutes:
-                            matching_programs.append(program)
-                            seen_programs.add(prog_key)
-                            matched = True
-                            print(f"  ✓ Matched ({time_comparison}): {program.get('Item')} at {program_time} ({prog_time_minutes} < {ref_time_minutes})")
-                
-                # For exact time matches, continue with existing logic
-                if not matched and not time_comparison:
-                    # Check if any normalized time format matches
-                    for norm_time in normalized_times:
-                        norm_time_upper = norm_time.upper()
-                        if norm_time_upper in program_time or program_time in norm_time_upper:
-                            matching_programs.append(program)
-                            seen_programs.add(prog_key)
-                            matched = True
-                            print(f"  ✓ Matched (normalized): {program.get('Item')} at {program_time}")
-                            break
-                
-                # If not matched yet, do fuzzy hour matching ONLY if:
-                # 1. The program time has no minutes (or minutes are 00)
-                # 2. The query doesn't specify minutes
-                # This prevents "1 pm" from matching "1:30 pm"
-                if not matched and not time_comparison:
-                    # Check if program time has non-zero minutes
-                    # Patterns: "13:30", "13:30:00", "1:30 PM", etc.
-                    prog_has_minutes = bool(re.search(r':\d{2}[:\d]*', program_time))
-                    if prog_has_minutes:
-                        # Extract minutes from program time
-                        minute_match = re.search(r':(\d{2})', program_time)
-                        if minute_match:
-                            prog_minutes = int(minute_match.group(1))
-                            # Only match if minutes are 00 (exact hour match)
-                            if prog_minutes != 0:
-                                continue  # Skip this program - it has non-zero minutes
-                    
-                    # Check if query specifies minutes
-                    query_has_minutes = bool(re.search(r':\d{2}', time_query.upper()))
-                    
-                    query_hour_match = re.search(r'(\d{1,2})', time_query.upper())
-                    prog_hour_match = re.search(r'(\d{1,2})', program_time)
-                    if query_hour_match and prog_hour_match:
-                        query_hour = int(query_hour_match.group(1))
-                        prog_hour = int(prog_hour_match.group(1))
-                        # Handle PM conversion
-                        is_query_pm = 'PM' in time_query.upper()
-                        is_prog_pm = 'PM' in program_time
-                        
-                        # Convert to 24-hour format for comparison
-                        if is_query_pm and query_hour < 12:
-                            query_hour_24 = query_hour + 12
-                        elif is_query_pm and query_hour == 12:
-                            query_hour_24 = 12
-                        elif not is_query_pm and query_hour == 12:
-                            query_hour_24 = 0
-                        else:
-                            query_hour_24 = query_hour
-                            
-                        if is_prog_pm and prog_hour < 12:
-                            prog_hour_24 = prog_hour + 12
-                        elif is_prog_pm and prog_hour == 12:
-                            prog_hour_24 = 12
-                        elif not is_prog_pm and prog_hour == 12:
-                            prog_hour_24 = 0
-                        else:
-                            prog_hour_24 = prog_hour
-                        
-                        # Match ONLY if:
-                        # - Hours are the same AND
-                        # - Program has no minutes or minutes are 00 (for exact hour queries)
-                        # - OR query explicitly specifies minutes (then do minute matching too)
-                        if query_hour_24 == prog_hour_24:
-                            # If query has no minutes, only match programs with 00 minutes
-                            if not query_has_minutes:
-                                # Verify program has 00 minutes or no minutes specified
-                                if prog_has_minutes:
-                                    minute_match = re.search(r':(\d{2})', program_time)
-                                    if minute_match and int(minute_match.group(1)) != 0:
-                                        continue  # Skip - has non-zero minutes
-                            
-                            matching_programs.append(program)
-                            seen_programs.add(prog_key)
-                            print(f"  ✓ Matched (hour): {program.get('Item')} at {program_time} (query: {query_hour_24}h, program: {prog_hour_24}h)")
+                matches_simple = grade_pattern_simple.findall(normalized)
+                for grade, percent, points in matches_simple:
+                    grade_letter = grade.upper()
+                    if grade_letter not in all_matches:
+                        # For simple matches, assume "and above" if it's Grade A, otherwise check context
+                        all_matches[grade_letter] = (percent, "above", points)
             
-            print(f"Total matches found: {len(matching_programs)}")
+            if all_matches:
+                grade_info = []
+                # Sort grades: A, B, C, etc.
+                for grade_letter in sorted(all_matches.keys()):
+                    min_pct, max_pct, points = all_matches[grade_letter]
+                    if max_pct == "above":
+                        grade_info.append(f"Grade {grade_letter} ({min_pct}% and above) = {points} points")
+                    else:
+                        grade_info.append(f"Grade {grade_letter} ({min_pct}% to {max_pct}%) = {points} points")
+                
+                if grade_info:
+                    # If user asked about a specific grade (e.g., "Grade B"), return just that grade
+                    # Otherwise return all grades
+                    user_msg_lower = user_message.lower()
+                    if "grade b" in user_msg_lower or "gradeb" in user_msg_lower:
+                        grade_b_info = [g for g in grade_info if "Grade B" in g]
+                        if grade_b_info:
+                            return grade_b_info[0]
+                    elif "grade a" in user_msg_lower or "gradea" in user_msg_lower:
+                        grade_a_info = [g for g in grade_info if "Grade A" in g]
+                        if grade_a_info:
+                            return grade_a_info[0]
+                    elif "grade c" in user_msg_lower or "gradec" in user_msg_lower:
+                        grade_c_info = [g for g in grade_info if "Grade C" in g]
+                        if grade_c_info:
+                            return grade_c_info[0]
+                    # Otherwise return all grades found
+                    return "\n".join(grade_info)
+            
+            # Fallback: Try line-based scan for Grade A row (if all-grade extraction didn't work)
+            lines = [l.strip() for l in normalized.splitlines() if l.strip()]
+            for i, line in enumerate(lines):
+                if re.search(r"^grade\s*a\b", line, flags=re.IGNORECASE):
+                    # Look ahead a few lines to find points
+                    lookahead = " ".join(lines[i:i+4])
+                    m = re.search(r"(\b5\b|\d+)\s*point[s]?", lookahead, flags=re.IGNORECASE)
+                    if m:
+                        pts = m.group(1)
+                        return f"Grade A (70% and above) = {pts} points"
+            
+            # Fallback: compact table form "Grade A ... 5 points"
+            m2 = re.search(r"Grade\s*A[^\n]*?(\d+)%[^\n]*?(\d+)\s*point", normalized, flags=re.IGNORECASE)
+            if m2:
+                return f"Grade A ({m2.group(1)}% and above) = {m2.group(2)} points"
+    except Exception as e:
+        print(f"Error in grade extraction: {e}")
+        pass
+    
+    # Helper function to find matching section headers
+    def find_matching_section_headers(query_text, source_text):
+        """Dynamically find section headers that match the query keywords.
+        Looks for ALL-CAPS headers or Title Case headers in the source text.
+        """
+        if not source_text:
+            return []
         
-        # If no time-based matches or no time query, try name-based matching
-        if not matching_programs:
-            if exact_name_matches:
-                matching_programs = exact_name_matches
+        # Extract keywords from query
+        query_lower = query_text.lower()
+        keywords = [w for w in query_text.split() if len(w) > 3]  # Get meaningful words
+        
+        # Find potential section headers (ALL-CAPS lines, typically followed by roman numerals)
+        lines = source_text.split('\n')
+        potential_headers = []
+        
+        # Pattern for ALL-CAPS headers (6+ chars, mostly uppercase)
+        all_caps_pattern = re.compile(r'^[A-Z][A-Z0-9 ./&()-,]{4,}$')
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            # Check if it's a potential section header
+            if all_caps_pattern.match(stripped) and len(stripped) > 5:
+                # Check if it contains query keywords
+                header_lower = stripped.lower()
+                if any(kw.lower() in header_lower for kw in keywords):
+                    potential_headers.append(stripped)
+        
+        return potential_headers
+    
+    # Only use structured section extraction for questions asking about specific sections
+    # Skip for simple fact queries (phone numbers, dates, fees, value points that need direct extraction)
+    # This prevents wrong section matching for factual questions
+    # is_factual_query is already defined earlier in the function
+    
+    # Skip structured extraction for factual queries - let LLM handle those directly from chunks
+    if not is_factual_query:
+        # Try generic section extraction for structured questions (trophies, rules, etc.)
+        section_candidates = [manual_text or "", pdf_chunks or ""]
+        for blob in section_candidates:
+            if not blob:
+                continue
+            
+            # Dynamically find matching section headers
+            matching_headers = find_matching_section_headers(user_message, blob)
+            
+            if matching_headers:
+                # Try to extract the first (most relevant) matching section
+                for header in matching_headers:
+                    extracted_bullets = extract_structured_section(
+                        blob,
+                        section_headers=[header],
+                        max_scan_chars=2500
+                    )
+                    if extracted_bullets:
+                        print(f"Extracted {len(extracted_bullets)} points from '{header}' section")
+                        
+                        # Check if question is asking for a specific value (fee, percentage, etc.)
+                        question_lower = user_message.lower()
+                        
+                        # For simple "what is X?" questions, extract the specific answer
+                        if any(q in question_lower for q in ["what is", "how much", "what's", "tell me"]):
+                            # Try to extract the specific answer (e.g., fee amount)
+                            answer_text = " ".join(extracted_bullets)
+                            
+                            # Look for specific patterns (fees, percentages, etc.)
+                            fee_match = re.search(r'Rs\.?\s*(\d+[,\d]*)/?-?', answer_text, re.IGNORECASE)
+                            percentage_match = re.search(r'(\d+)%\s*(and\s*above|to\s*\d+%)?', answer_text, re.IGNORECASE)
+                            
+                            if fee_match:
+                                amount = fee_match.group(1)
+                                # Generate human-friendly, natural response
+                                if "appeal" in question_lower:
+                                    return f"The appeal fee is Rs. {amount}/-."
+                                else:
+                                    return f"The fee is Rs. {amount}/-."
+                            elif percentage_match:
+                                pct = percentage_match.group(1)
+                                range_text = percentage_match.group(2) or ""
+                                if range_text:
+                                    return f"Grade A requires {pct}%{range_text}."
+                                else:
+                                    return f"Grade A requires {pct}%."
+                            else:
+                                # For simple questions, extract just the direct answer from first bullet
+                                first_bullet = extracted_bullets[0]
+                                
+                                # Clean up the text - remove header artifacts, dates, etc.
+                                # Remove things like "Labour India Public School CBSE State Kalotsav 2K25..."
+                                cleaned = re.sub(r'Labour India Public School.*?Kalotsav.*?\d+', '', first_bullet, flags=re.IGNORECASE)
+                                cleaned = cleaned.strip()
+                                
+                                # If it's still long, try to extract just the key sentence
+                                if len(cleaned) > 300:
+                                    sentences = cleaned.split('.')
+                                    # Take first 2 sentences that are relevant
+                                    cleaned = '. '.join(sentences[:2]) + '.'
+                                
+                                return cleaned
+                        else:
+                            # For general questions, format as friendly list but keep it concise
+                            if len(extracted_bullets) == 1:
+                                return extracted_bullets[0]
+                            else:
+                                bullets = "\n".join([f"• {b}" for b in extracted_bullets])
+                                return bullets
+    
+    # Build context from all available sources
+    final_context_parts = []
+    
+    # 1. Manual text snippets (if available)
+    if manual_text:
+        try:
+            print("Extracting relevant manual snippets...")
+            manual_snippets = find_relevant_manual_snippets(manual_text, query_terms)
+            content_for_ai = "\n\n".join(manual_snippets) if manual_snippets else manual_text[:9000]
+            if content_for_ai:
+                final_context_parts.append("[Manual]\n" + content_for_ai)
+                print(f"Added manual context ({len(content_for_ai)} chars)")
+        except Exception as e:
+            print(f"Error processing manual text: {e}")
+    
+    # 2. Excel/Schedule data - CRITICAL for schedule questions; skip for factual (phone/fee) queries
+    if not is_factual_query:
+        # FAISS semantic search only (no linear search fallback)
+        if excel_chunks:
+            # For schedule questions, emphasize Excel data comes first
+            if is_schedule_question:
+                final_context_parts.insert(0, "[SCHEDULE - PRIMARY SOURCE (FAISS)]\n" + excel_chunks)
+                print(f"Added Excel embeddings context as PRIMARY SOURCE ({len(excel_chunks)} chars)")
             else:
-                # Fallback to token-based loose matching
-                item_name_terms = [w for w in user_message.split() if len(w) > 3]
-                for program in excel_rows:
-                    item_name = program.get("Item", "").upper()
-                    if any(term.upper() in item_name for term in item_name_terms):
-                        matching_programs.append(program)
-
-        if matching_programs:
-            print(f"[DEBUG] Found {len(matching_programs)} matching program(s) in Excel data for '{user_message}':")
-            for i, prog in enumerate(matching_programs):
-                print(f"  [{i+1}] Item: {prog.get('Item')}, Time: {prog.get('Time')}, Category: {prog.get('Category')}, Date: {prog.get('Date')}")
-            # Remove duplicates from matching_programs (unique by item, time, category, date)
-            seen = set()
-            deduped = []
-            for prog in matching_programs:
-                prog_key = (
-                    prog.get("Item", "").strip().upper(),
-                    prog.get("Time", "").strip().upper(),
-                    prog.get("Category", "").strip().upper(),
-                    str(prog.get("Date", "")).strip()
-                )
-                if prog_key not in seen:
-                    seen.add(prog_key)
-                    deduped.append(prog)
-            matching_programs = deduped
-            
-            # Helper function to format date nicely
-            def format_date_for_answer(date_str):
-                """Convert date to human-readable format"""
-                if not date_str or date_str == "N/A" or str(date_str) == "nan":
-                    return ""
-                try:
-                    # Try parsing different date formats
-                    date_str_clean = str(date_str).strip()
-                    # If already in DD-MM-YYYY format, use as is
-                    if re.match(r'\d{2}-\d{2}-\d{4}', date_str_clean):
-                        return date_str_clean
-                    # Try parsing as pandas datetime
-                    date_obj = pd.to_datetime(date_str_clean, errors='coerce')
-                    if pd.notna(date_obj):
-                        return date_obj.strftime("%d-%m-%Y")
-                except:
-                    pass
-                # Fallback: just return cleaned string
-                return str(date_str).replace("00:00:00", "").strip()
-            
-            # If the user specified a date or day, filter to that date only
-            filter_date = None
-            if extracted.get("date"):
-                try:
-                    filter_date = pd.to_datetime(extracted["date"]).strftime("%d-%m-%Y")
-                except Exception:
-                    filter_date = extracted["date"]
-            elif extracted.get("day"):
-                day_key = extracted["day"].upper()
-                filter_date = DAY_MAPPING.get(day_key)
-
-            if filter_date:
-                filtered_matches = []
-                for prog in matching_programs:
-                    prog_date = str(prog.get("Date", "")).strip()
-                    try:
-                        prog_date_norm = pd.to_datetime(prog_date).strftime("%d-%m-%Y")
-                    except Exception:
-                        prog_date_norm = prog_date
-                    if prog_date_norm == filter_date:
-                        filtered_matches.append(prog)
-                if filtered_matches:
-                    matching_programs = filtered_matches
-                    print(f"Filtered to {len(matching_programs)} program(s) for date {filter_date}")
+                final_context_parts.append("[Schedule (FAISS)]\n" + excel_chunks)
+                print(f"Added Excel embeddings context ({len(excel_chunks)} chars)")
+        else:
+            # FAISS not available - skip Excel data (no linear search fallback)
+            print("\nExcel FAISS embeddings not available - skipping Excel data (FAISS required for Excel search)")
+    
+    # 3. FAISS PDF chunks - SKIP for schedule/time questions (use Excel data only)
+    # Note: PDF "TIME" column = duration (1hr, 5mts), NOT scheduled time
+    # Excel "Time" column = actual scheduled time (8:30 AM, 1:00 PM)
+    # For schedule questions, ONLY use Excel data - PDF chunks contain category descriptions that confuse schedule queries
+    if pdf_chunks and not (is_schedule_question or time_query):
+        # Only include PDF chunks for factual queries (fees, rules, grades, etc.), NOT for schedule queries
+        pdf_header = "[PDF Chunks]\n"
+        final_context_parts.append(pdf_header + pdf_chunks)
+        print(f"Added PDF chunks context ({len(pdf_chunks)} chars)")
+    elif pdf_chunks and (is_schedule_question or time_query):
+        # Skip PDF chunks for schedule questions - they contain category descriptions that confuse the LLM
+        print("Skipping PDF chunks for schedule/time query - using Excel data only")
+    else:
+        print("No PDF chunks retrieved - FAISS may not be available or index not found")
+    
+    # If we have any context, use AI to answer
+    if final_context_parts:
+        final_context = "\n\n".join(final_context_parts)
+        # Limit to 14000 chars to leave room for prompt
+        final_context = final_context[:14000]
+        
+        print(f"\n=== Sending to LLM with context ({len(final_context)} chars) ===")
+        print(f"Context preview:\n{final_context[:800]}...")
+        
+        # DEBUG: Check if Excel chunks are in the context
+        if "[SCHEDULE - PRIMARY SOURCE (FAISS)]" in final_context or "[Schedule (FAISS)]" in final_context:
+            excel_start = final_context.find("[SCHEDULE") if "[SCHEDULE" in final_context else final_context.find("[Schedule (FAISS)]")
+            excel_end = final_context.find("\n\n[", excel_start + 50) if excel_start != -1 else len(final_context)
+            excel_section = final_context[excel_start:excel_end] if excel_start != -1 else ""
+            if excel_section:
+                print(f"\n=== DEBUG: Excel FAISS Section in Context ===")
+                print(excel_section[:1000] + "..." if len(excel_section) > 1000 else excel_section)
+                print("=" * 60)
+        
+        # DEBUG: Check if context contains the answer keywords
+        context_lower = final_context.lower()
+        if "grade a" in context_lower or "grade" in context_lower:
+            print(f"Context contains 'grade' keyword")
+        if "70%" in final_context or "70" in final_context:
+            print(f"Context contains '70%' or '70'")
+        if "percentage" in context_lower:
+            print(f"Context contains 'percentage' keyword")
+        if "fixing of grade" in context_lower:
+            print(f"Context contains 'Fixing of Grade' section!")
+        if "trophies to schools" in context_lower:
+            print(f"Context contains 'TROPHIES TO SCHOOLS' section!")
+        if "ever rolling trophy" in context_lower:
+            print(f"Context contains 'ever rolling trophy' information!")
+        # Check for value points info
+        if "value point" in context_lower:
+            print(f"Context contains 'Value Points' information!")
+        if "folk dance" in context_lower and ("mark" in context_lower or "value point" in context_lower):
+            print(f"*** Context contains FOLK DANCE VALUE POINTS! ***")
+        
+        # Try to find and highlight relevant chunks
+        chunks_list = final_context.split("---")
+        for i, chunk in enumerate(chunks_list):
+            if "grade" in chunk.lower() and ("70" in chunk or "%" in chunk):
+                print(f"\nFOUND RELEVANT CHUNK #{i+1} (Grade info):")
+                print(chunk[:500])
+            if "trophies to schools" in chunk.lower() or ("trophy" in chunk.lower() and "school" in chunk.lower()):
+                print(f"\nFOUND RELEVANT CHUNK #{i+1} (Trophies info):")
+                print(chunk[:500])
 
             # Apply category filtering if category is specified (even with time query)
             if extracted.get("category"):
@@ -1817,15 +2021,26 @@ def search_program_data(extracted, user_message, combined_data=None):
                     # Excel answer only, return immediately
                     return excel_answer
         else:
-            # No Excel match - check if we have PDF chunks before giving up
-            if not pdf_chunks or len(pdf_chunks.strip()) <= 50:
-                # No Excel match and no PDF chunks - avoid hallucination
-                return (
-                    "I couldn't find that program in the official schedule. "
-                    "Please check the exact program name or share a screenshot of the row."
-                )
-            # PDF chunks found - let it fall through to LLM processing below
-            print("No Excel match, but PDF chunks found - using PDF chunks for answer")
+            # No Excel match - for schedule questions, don't use PDF chunks
+            if not matching_programs and not excel_chunks:
+                if is_schedule_question:
+                    # For schedule questions, Excel data is authoritative - don't use PDF chunks
+                    print("No Excel match found for schedule question - returning 'not found' message")
+                    filter_info = ""
+                    if filter_date:
+                        filter_info = f" on {filter_date}"
+                    if time_query:
+                        filter_info = f" at {time_query}{filter_info}"
+                    return f"I couldn't find any programs scheduled{filter_info}. Please check the time and date."
+                elif pdf_chunks and len(pdf_chunks.strip()) > 50:
+                    # No Excel match and PDF chunks found - use PDF chunks for factual queries only
+                    print("No Excel match, but PDF chunks found - using PDF chunks for answer")
+                else:
+                    # No Excel match and no PDF chunks - avoid hallucination
+                    return (
+                        "I couldn't find that program in the official schedule. "
+                        "Please check the exact program name or share a screenshot of the row."
+                    )
     
     # PDF chunks already retrieved at the top of function - continue to use them
     
@@ -1963,7 +2178,7 @@ def search_program_data(extracted, user_message, combined_data=None):
                         else:
                             bullets = "\n".join([f"• {b}" for b in extracted_bullets])
                             return bullets
-
+    
     # Build context from all available sources
     final_context_parts = []
     
@@ -1981,23 +2196,31 @@ def search_program_data(extracted, user_message, combined_data=None):
     
     # 2. Excel/Schedule data - CRITICAL for schedule questions; skip for factual (phone/fee) queries
     if not is_factual_query:
-        excel_context = build_excel_context_rows(combined_data, query_terms)
-        if excel_context:
+        # FAISS semantic search only (no linear search fallback)
+        if excel_chunks:
             # For schedule questions, emphasize Excel data comes first
             if is_schedule_question:
-                final_context_parts.insert(0, "[SCHEDULE - PRIMARY SOURCE]\n" + excel_context)
-                print(f"Added schedule context as PRIMARY SOURCE ({len(excel_context)} chars)")
+                final_context_parts.insert(0, "[SCHEDULE - PRIMARY SOURCE (FAISS)]\n" + excel_chunks)
+                print(f"Added Excel embeddings context as PRIMARY SOURCE ({len(excel_chunks)} chars)")
             else:
-                final_context_parts.append("[Schedule]\n" + excel_context)
-                print(f"Added schedule context ({len(excel_context)} chars)")
+                final_context_parts.append("[Schedule (FAISS)]\n" + excel_chunks)
+                print(f"Added Excel embeddings context ({len(excel_chunks)} chars)")
+        else:
+            # FAISS not available - skip Excel data (no linear search fallback)
+            print("\nExcel FAISS embeddings not available - skipping Excel data (FAISS required for Excel search)")
     
-    # 3. FAISS PDF chunks (ALWAYS try to include, independent of manual text)
+    # 3. FAISS PDF chunks - SKIP for schedule/time questions (use Excel data only)
     # Note: PDF "TIME" column = duration (1hr, 5mts), NOT scheduled time
     # Excel "Time" column = actual scheduled time (8:30 AM, 1:00 PM)
-    if pdf_chunks:
-        pdf_header = "[PDF Chunks - NOTE: PDF 'TIME' column is DURATION (1hr, 5mts), NOT scheduled time]\n" if is_schedule_question else "[PDF Chunks]\n"
+    # For schedule questions, ONLY use Excel data - PDF chunks contain category descriptions that confuse schedule queries
+    if pdf_chunks and not (is_schedule_question or time_query):
+        # Only include PDF chunks for factual queries (fees, rules, grades, etc.), NOT for schedule queries
+        pdf_header = "[PDF Chunks]\n"
         final_context_parts.append(pdf_header + pdf_chunks)
         print(f"Added PDF chunks context ({len(pdf_chunks)} chars)")
+    elif pdf_chunks and (is_schedule_question or time_query):
+        # Skip PDF chunks for schedule questions - they contain category descriptions that confuse the LLM
+        print("Skipping PDF chunks for schedule/time query - using Excel data only")
     else:
         print("No PDF chunks retrieved - FAISS may not be available or index not found")
     
@@ -2009,6 +2232,16 @@ def search_program_data(extracted, user_message, combined_data=None):
         
         print(f"\n=== Sending to LLM with context ({len(final_context)} chars) ===")
         print(f"Context preview:\n{final_context[:800]}...")
+        
+        # DEBUG: Check if Excel chunks are in the context
+        if "[SCHEDULE - PRIMARY SOURCE (FAISS)]" in final_context or "[Schedule (FAISS)]" in final_context:
+            excel_start = final_context.find("[SCHEDULE") if "[SCHEDULE" in final_context else final_context.find("[Schedule (FAISS)]")
+            excel_end = final_context.find("\n\n[", excel_start + 50) if excel_start != -1 else len(final_context)
+            excel_section = final_context[excel_start:excel_end] if excel_start != -1 else ""
+            if excel_section:
+                print(f"\n=== DEBUG: Excel FAISS Section in Context ===")
+                print(excel_section[:1000] + "..." if len(excel_section) > 1000 else excel_section)
+                print("=" * 60)
         
         # DEBUG: Check if context contains the answer keywords
         context_lower = final_context.lower()
@@ -2058,6 +2291,12 @@ def search_program_data(extracted, user_message, combined_data=None):
                     - Manual: Rules, fees, awards, regulations
                     - PDF Chunks: Semantic search results from the festival manual/guide (use ONLY for fees, rules, awards, grades, percentages, tables, durations, remarks, notes - NOT for schedule/time questions)
                     
+                    ⚠️ CRITICAL FOR SCHEDULE QUESTIONS: 
+                    - If this is a schedule/time question (e.g., "list items at 8:30 AM on Friday"), ONLY use "[SCHEDULE - PRIMARY SOURCE]" data
+                    - COMPLETELY IGNORE PDF chunks for schedule/time questions - they contain category descriptions, NOT schedule data
+                    - PDF chunks may contain text like "CATEGORY 1 (CLASS III AND IV)" - this is NOT schedule information, ignore it
+                    - Only Excel schedule data contains actual scheduled times and dates
+                    
                     ⚠️ CRITICAL: TIME COLUMN DISTINCTION ⚠️
                     - Excel "Time" column = ACTUAL SCHEDULED TIME of program (e.g., "8:30 AM", "1:00 PM") - USE THIS for "when is X?", "what time is Y?", schedule questions
                     - PDF "TIME" column = DURATION of program (e.g., "1hr", "5mts", "30mts") - USE THIS for "how long is X?", "duration of Y?", "length of Z?" questions
@@ -2065,16 +2304,44 @@ def search_program_data(extracted, user_message, combined_data=None):
                     - For questions about "duration of X?", "how long is Y?", "length of Z?" → USE PDF "TIME" column (duration in hrs/mts), convert to minutes or standard format like "X min"
                     
                     CRITICAL PRIORITY FOR SCHEDULE QUESTIONS:
-                    - If you see "[SCHEDULE - PRIMARY SOURCE]" → Use ONLY that data for stage/program/time questions
-                    - Excel "Time" has ACTUAL SCHEDULED TIMES like "8:30 AM", "1:00 PM" - use these EXACT values for time questions
+                    - ⚠️ CRITICAL: For schedule/time questions, ONLY use "[SCHEDULE - PRIMARY SOURCE]" data - IGNORE PDF chunks completely
+                    - ⚠️ CRITICAL: PDF chunks contain category descriptions (like "CATEGORY 1 (CLASS III AND IV)") which are NOT schedule data - DO NOT use them for schedule queries
+                    - ⚠️ CRITICAL: PDF chunks do NOT contain scheduled times or dates - only use Excel schedule data for "when" or "what time" questions
+                    - If you see "[SCHEDULE - PRIMARY SOURCE]" → Use ONLY that data for stage/program/time questions - IGNORE everything else
+                    - Scheduled times like "8:30 AM", "1:00 PM" - use these EXACT values for time questions
+                    - ⚠️ CRITICAL FOR LIST QUERIES: If asked to "list items at [time]" or "what's happening at [time]", you MUST:
+                      1. IGNORE PDF chunks completely - they do NOT contain schedule information
+                      2. Scan through EVERY chunk in the "[SCHEDULE - PRIMARY SOURCE]" section ONLY
+                      3. Extract EVERY item that has the exact time (e.g., "8:30 AM", "8:30AM", "8.30 AM")
+                      4. Extract EVERY item that has the matching date (e.g., Friday = 11/14/2025, 11-14-2025, 14-11-2025)
+                      5. Count ALL matching items first, then list each one
+                      6. DO NOT summarize - list EVERY single item individually
+                      7. Format as: "There are X items at [time] on [day]:\n• Item Name (Category)\n• Item Name (Category)\n..." with ALL items listed
                     - PDF "TIME" has DURATIONS like "1hr", "5mts" - DO NOT use these for schedule/time questions, they're just durations
-                    - Excel schedule has exact stage numbers like "STAGE 9", "STAGE 11" - use those EXACT values
-                    - DO NOT mix PDF chunk category descriptions (like "Category III (Classes VIII to X)") with Excel stage numbers
-                    - If a program appears on multiple stages in Excel, list ALL stages
-                    - Excel data is authoritative for schedule/time questions - ignore conflicting PDF chunk descriptions
+                    - Stage numbers like "STAGE 9", "STAGE 11" - use those EXACT values
+                    - DO NOT mix PDF chunk category descriptions (like "Category III (Classes VIII to X)") with schedule stage numbers
+                    - If a program appears on multiple stages, list ALL stages
+                    - Schedule data is authoritative for schedule/time questions - ignore conflicting PDF chunk descriptions
                     - If PDF chunks mention a "TIME" column, that's DURATION (how long), not scheduled time (when it happens)
                     
-                    {f"THIS IS A SCHEDULE QUESTION - USE EXCEL 'Time' (scheduled time like '8:30 AM'), IGNORE PDF 'TIME' (duration like '1hr'). USE ONLY [SCHEDULE - PRIMARY SOURCE] DATA" if is_schedule_question else ""}
+                    ⚠️ CRITICAL: NEVER HALLUCINATE OR INVENT DATA ⚠️
+                    - ONLY use dates, times, and categories that are EXACTLY shown in the schedule data
+                    - If schedule shows "11/12/2025" → use that date, NOT "14-11-2025" or any other date
+                    - If schedule shows "CATEGORY II" → use that category, NOT "Category I" or any other category
+                    - If a program is NOT in the schedule data for a specific date/category → DO NOT make up information
+                    - If you cannot find the exact match in schedule data, say "I don't see that program for that date/category"
+                    - DO NOT combine dates from different sources or invent dates/times that don't exist in schedule data
+                    
+                    ⚠️ CRITICAL: NO HALLUCINATION RULE ⚠️
+                    - ONLY use dates, times, categories, and programs that EXACTLY appear in the schedule data from "[SCHEDULE - PRIMARY SOURCE]"
+                    - NEVER make up or guess dates, times, or categories that are not explicitly shown in the schedule data
+                    - If schedule shows "11/12/2025" or "11-12-2025", use that EXACT date - DO NOT convert to "14-11-2025" or any other date
+                    - If schedule shows "CATEGORY II", use "Category II" - DO NOT change it to "Category I" or any other category
+                    - If the program is not found in schedule data, say "I don't see that program" - DO NOT make up information
+                    - If schedule shows multiple entries for the same program, list ALL of them with their EXACT dates and categories
+                    - DO NOT combine or merge different entries - report each one separately as it appears in schedule data
+                    
+                    {f"THIS IS A SCHEDULE QUESTION - USE schedule 'Time' (scheduled time like '8:30 AM'), IGNORE PDF 'TIME' (duration like '1hr'). USE ONLY [SCHEDULE - PRIMARY SOURCE] DATA" if is_schedule_question else ""}
                     
                     CRITICAL RULES FOR TABLES, CHARTS, GRADES, AND VALUE POINTS:
                     1. PDF Chunks may contain TABLES, CHARTS, or FORMATTED DATA - look carefully for tabular information
@@ -2099,8 +2366,12 @@ def search_program_data(extracted, user_message, combined_data=None):
                     7. Tables often have headers like "Grade", "Percentage", "Points", "Value Points", "Marks" - match these with question keywords
                     8. Extract relationships like "Grade A = 70% and above" or "Grade A = 70%+" when you see them
                     9. If you see percentage ranges (e.g., "70% and above", "60% to 69%"), use those exact ranges
-                    10. For value points: Extract ALL criteria/evaluation items and their corresponding marks, format them clearly as: "Item Name - X marks". List ALL items found under the relevant category header (e.g., "Folk Dance")
-                    11. CRITICAL: If you see "Value Points" followed by "Folk Dance" (or any category) in the context, extract EVERY item name and mark value from that section - DO NOT say "not mentioned"
+                    10. For grade points queries: Look for "Fixing of Grade" section or table. Extract ALL grades (Grade A, Grade B, Grade C, etc.) with their percentage requirements and corresponding points. Format as: "Grade A (70% and above) = 5 points", "Grade B (60-69%) = 4 points", etc.
+                    11. CRITICAL FOR GRADE POINTS: If you see "Fixing of Grade" or "Grade A", "Grade B" with percentages and points in the context, extract ALL grade information (Grade A, Grade B, Grade C, etc.) with their percentage ranges and points. DO NOT say "not mentioned" if this information exists in the chunks.
+                    12. CRITICAL FOR SPECIFIC GRADE QUERIES: If user asks about "Grade B" or "what about grade B", search for "Grade B" in the context. If "Grade B" appears with a percentage and points in the PDF chunks, extract it EXACTLY as shown. DO NOT make up or hallucinate grade information. If you see "Grade B: 60% to 69% = 3 points" extract it exactly as "Grade B (60% to 69%) = 3 points". If Grade B is not found in the context, say "I couldn't find Grade B information in the provided context" - DO NOT invent or hallucinate.
+                    13. CRITICAL: NEVER HALLUCINATE GRADE INFORMATION - ONLY extract what is EXACTLY shown in the PDF chunks. If Grade B says "60% to 69%" do NOT say "60% and above". If Grade C says "50% to 59%" do NOT say "50% and above". Extract percentage ranges EXACTLY as shown.
+                    14. For value points: Extract ALL criteria/evaluation items and their corresponding marks, format them clearly as: "Item Name - X marks". List ALL items found under the relevant category header (e.g., "Folk Dance")
+                    15. CRITICAL: If you see "Value Points" followed by "Folk Dance" (or any category) in the context, extract EVERY item name and mark value from that section - DO NOT say "not mentioned"
                     
                     GENERAL CRITICAL RULES:
                     1. ALWAYS check PDF Chunks FIRST - search through EVERY chunk thoroughly
@@ -2115,10 +2386,13 @@ def search_program_data(extracted, user_message, combined_data=None):
                     10. For duration questions: Look for PDF "TIME" column values like "1hr", "5mts", "30mts", "1 hour", "5 minutes". Convert to standard format: "1hr" → "60 min", "5mts" → "5 min", "30mts" → "30 min". Always format as "X min" or "X minutes" for consistency.
                     11. For remarks/notes questions: Look for information in parentheses like "(Common for both boys & girls)", "(Common for both boys and girls)", or other notes listed after the item name and duration in PDF chunks. These notes appear on the line immediately after the duration. Extract ANY text in parentheses or on lines following the item name that provides additional information. Format as: "The remarks for [Item Name] are: [remarks text]". If you find ANY remarks/notes in the PDF chunks, provide them - DO NOT say "not mentioned" if remarks exist.
                     12. Provide precise answers with exact numbers/percentages/phone numbers/durations/remarks when found - extract them directly from the context
-                    13. Use WhatsApp-friendly formatting: *bold* for key labels, bullets for lists
-                    14. If multiple relevant entries exist, list them all clearly
-                    15. If you find partial information (e.g., just percentage, just phone number), provide what you found
-                    16. Phone numbers might appear as digits only (e.g., "9778665476") or with separators - extract them as found
+                    13. For merit certificate questions: Search for "merit certificate", "minimum marks", "50%", "first second third positions", "awards and trophies" in PDF chunks. If you see "minimum of 50% marks shall be awarded merit certificates" or similar text, extract the exact percentage (e.g., "50%") and explain the requirement clearly.
+                    14. For awards/trophies questions: Look for sections titled "AWARDS AND TROPHIES" or similar headers. Extract information about merit certificates, participation certificates, minimum marks requirements, etc.
+                    15. CRITICAL FOR MERIT CERTIFICATE QUERIES: If you see "minimum of 50% marks" or "50% marks" mentioned with "merit certificate" in the context, the answer IS THERE - extract it and provide it. DO NOT say "not mentioned" or "not specified" if this information exists in the chunks.
+                    16. Use WhatsApp-friendly formatting: *bold* for key labels, bullets for lists
+                    17. If multiple relevant entries exist, list them all clearly
+                    18. If you find partial information (e.g., just percentage, just phone number), provide what you found
+                    19. Phone numbers might appear as digits only (e.g., "9778665476") or with separators - extract them as found
                     
                     Answer format: Write naturally and conversationally. Be direct but friendly. Extract exact values from PDF Chunks. For tables, value points, or structured data, format them clearly with item names and values (e.g., "Item Name - X marks"), never output raw number sequences."""},
                     {"role": "user", "content": f"""Question: {user_message}
@@ -2127,9 +2401,46 @@ Available Context:
 {final_context}
 
 CRITICAL INSTRUCTIONS:
-1. CAREFULLY search through ALL sections - "[PDF Chunks]", "[Manual]", and "[Schedule]" - scan EVERY chunk thoroughly
-2. Look for information that relates to the question - use semantic understanding, not just exact keyword matches
-3. Extract relevant information even if:
+1. FOR SCHEDULE/TIME/PROGRAM QUESTIONS: 
+   - ⚠️ CRITICAL: For schedule/time questions, COMPLETELY IGNORE PDF chunks - they contain category descriptions, NOT schedule data
+   - ⚠️ CRITICAL: PDF chunks may contain text like "CATEGORY 1 (CLASS III AND IV)" - this is NOT schedule information, ignore it completely
+   - FIRST check "[SCHEDULE - PRIMARY SOURCE]" or "[Schedule (FAISS)]" section - this is the ONLY source for schedule data
+   - ONLY use dates, times, categories, and programs that EXACTLY appear in that section
+   - ⚠️ CRITICAL: For "list items at [time]" or "what's happening at [time]" questions, you MUST list EVERY SINGLE item that appears at that time in the schedule data
+   - ⚠️ CRITICAL: If asked "list items at 8:30 AM on Friday", search through ALL schedule chunks and list EVERY item that has Time="8:30 AM" (or "8:30AM" or "8.30 AM") and Date matching Friday (11/14/2025 or 11-14-2025 or 14-11-2025)
+   - ⚠️ CRITICAL: DO NOT return just one item - scan through ALL schedule chunks from top to bottom and extract EVERY item that matches the time and date criteria
+   - ⚠️ CRITICAL: If the schedule shows 30+ items at 8:30 AM on Friday, list ALL 30+ items - DO NOT summarize, DO NOT skip any, DO NOT say "and more" - list EVERY ONE
+   - ⚠️ CRITICAL: Read through the ENTIRE "[SCHEDULE - PRIMARY SOURCE]" section chunk by chunk, line by chunk, and extract EVERY matching item
+   - Count how many items match the criteria FIRST, then list each one with its exact category as shown
+   - Format as: "There are X items at [time] on [day]:\n• Item 1 (Category as shown)\n• Item 2 (Category as shown)\n..." listing ALL items - NO EXCEPTIONS
+   - ⚠️ CRITICAL FOR "WHAT CATEGORIES ARE PERFORMING" QUERIES:
+     * If asked "what categories are performing on [day]" or "what are the categories performing on [day]" or similar:
+     * Scan through ALL chunks in "[SCHEDULE - PRIMARY SOURCE]" section
+     * Extract EVERY unique Category value that appears for that specific day/date
+     * List ALL unique categories found (e.g., "CATEGORY I", "CATEGORY II", "CATEGORY III", "CATEGORY IV")
+     * Format as: "On [day], the following categories are performing:\n• Category I\n• Category II\n• Category III\n• Category IV" (or whatever categories you find)
+     * DO NOT say "I couldn't find" - if chunks exist for that day, extract the categories from them
+     * If you see "Category: CATEGORY I" or "Category: CATEGORY II" in any chunk for that day, include it in your list
+     * Count how many unique categories you found first, then list each one
+   - If you see multiple items with the same name but different categories, list them separately (e.g., "Folk Dance (CATEGORY I)" and "Folk Dance (CATEGORY III)")
+   - If schedule shows "Folk Dance - Girls" on "11/12/2025" with "CATEGORY II" → use EXACTLY those values
+   - If schedule shows "11/12/2025" → use that date, NOT "14-11-2025" or any other date
+   - If schedule shows "CATEGORY II" → use that category, NOT "Category I" or any other category  
+   - If the program is not found in schedule data for a specific date, say "I don't see that program on that date" - DO NOT make up dates or categories
+   - If schedule shows multiple entries (e.g., same program on different dates/categories), list ALL of them separately with their exact dates/categories
+   - DO NOT use dates from PDF chunks for schedule questions - schedule dates are authoritative
+   - DO NOT convert or change dates/times/categories from schedule - use them EXACTLY as shown
+   - DO NOT invent dates, times, or categories that are not in the schedule data
+   
+2. FOR FACTUAL QUESTIONS (fees, rules, grades, awards, certificates, etc.):
+   - Use PDF chunks and Manual sections
+   - These contain rules, fees, awards, certificates, and other factual information
+   - ⚠️ CRITICAL FOR MERIT CERTIFICATE QUERIES: Search for "merit certificate", "minimum marks", "50%", "awards and trophies" in PDF chunks
+   - If you see "minimum of 50% marks shall be awarded merit certificates" or similar text, extract the exact percentage (50%) and explain it clearly
+   - DO NOT say "not mentioned" or "not specified" if this information exists in the PDF chunks - search thoroughly through ALL chunks
+   - Look for sections titled "AWARDS AND TROPHIES" or similar headers
+3. Look for information that relates to the question - use semantic understanding, not just exact keyword matches
+4. Extract relevant information even if:
    - Formatting is messy or unconventional
    - Information is in tables, lists, or paragraph form
    - Keywords don't match exactly but meaning is similar
@@ -2151,7 +2462,7 @@ INSTRUCTIONS:
 
 Now answer the question: {user_message}"""}
                 ],
-                max_tokens=1000,
+                max_tokens=2000,  # Increased to prevent truncation of long lists
                 temperature=0.3
             )
             ai_response = response.choices[0].message.content.strip()
@@ -2607,7 +2918,9 @@ def generate_human_like_reply(user_message, info_text):
             system_prompt = """You are a clear, concise WhatsApp assistant for the Kalolsavam Cultural Festival.
             HARD CONSTRAINTS (NO HALLUCINATIONS):
             - Use ONLY the content provided by the assistant message; never add or infer extra items, dates, stages, or categories.
-            - If the user asks about a specific program name (e.g., MONO ACT), include ONLY lines that refer to that exact program name. Do NOT include similarly worded but different items (e.g., ENGLISH ONE ACT PLAY) when asked about MONO ACT.
+            - CRITICAL: Match the EXACT program/item name from the user's query. If user asks about "elocution topics", search ONLY for "elocution" in the assistant message, NOT other programs like "Mono Act".
+            - If the user asks about a specific program name (e.g., ELOCUTION, MONO ACT), include ONLY lines that refer to that exact program name. Do NOT include similarly worded but different items (e.g., ENGLISH ONE ACT PLAY) when asked about MONO ACT.
+            - If user asks about "topics for elocution" or "topics for it" (where "it" refers to elocution), search for "elocution" in the assistant message, NOT other programs.
             - If there is a single schedule entry, answer with ONE short, natural sentence.
             - If multiple entries exist for that same program, consolidate into one short readable sentence, listing each unique (Stage, Category, Date) only once.
             - If no entries for the exact program are present, clearly say you couldn't find it and suggest checking the exact program name. Do not fabricate.
@@ -2615,11 +2928,12 @@ def generate_human_like_reply(user_message, info_text):
             - Preserve exact dates as written; do not substitute with relative words.
             - IMPORTANT: If the assistant content contains entries that are NOT for the exact program requested, IGNORE those lines entirely."""
             
-            user_prompt = "Rewrite the above as a brief, human reply without emojis. Include ONLY entries that match the exact program name asked by the user. Do not add or infer any data that is not present above."
+            user_prompt = f"User asked: '{user_message}'\n\nRewrite the above assistant message as a brief, human reply without emojis. Include ONLY entries that match the exact program/item name from the user's query ('{user_message}'). Do not add or infer any data that is not present above. If user asked about a specific program (like 'elocution'), only include information about that program, NOT other programs."
         
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             temperature=0.1,
+            max_tokens=2000,  # Increased to prevent truncation of long lists
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
@@ -2734,7 +3048,7 @@ async def ask_unified_get(question: str = Query(None, description="Your question
 try:
     from api.ask import router as ask_router
     app.include_router(ask_router, tags=["ask"])
-    print("✓ Ask API router registered successfully")
+    print("[OK] Ask API router registered successfully")
     print(f"  - Router has {len(ask_router.routes)} route(s)")
     for route in ask_router.routes:
         print(f"  - Route: {route.methods} {route.path}")
